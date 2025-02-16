@@ -1,0 +1,9 @@
+cryptography>=41.0.0
+click>=8.0.0
+flask>=2.0.0
+pytest>=7.0.0
+pydantic>=2.0.0
+structlog>=23.0.0
+python-dotenv>=1.0.0
+PyJWT>=2.8.0
+Werkzeug>=3.0.0
