@@ -1,7 +1,8 @@
 # Secure Vault Documentation
 
 ## Overview
-Secure Vault is a professional-grade file encryption system that provides multiple ways to securely encrypt and manage sensitive files. It uses industry-standard encryption (AES-256-GCM) with modern security features like Argon2id key derivation and Ed25519 digital signatures.
+Secure Vault provides multiple ways to securely encrypt and manage sensitive files.
+It uses AES-256-GCM with modern security features like Argon2id key derivation and Ed25519 digital signatures.
 
 ## Installation
 
