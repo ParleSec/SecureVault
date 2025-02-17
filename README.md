@@ -17,7 +17,7 @@ A homebrewed secure file encryption system implementing modern cryptographic pri
 ```bash
 # Clone the repository
 git clone https://github.com/Bobfrog93/SecureVault
-cd secure-vault
+cd SecureVault
 
 # Install dependencies
 pip install -r requirements.txt

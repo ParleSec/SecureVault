@@ -166,6 +166,11 @@ Common Issues:
    - Possible tampering
    - Try from backup
 
+4. "No Module Named" error
+    - Verify requirements have been installed
+    - Check for correct declaration
+    - Manually install module
+
 ## Support
 
 For issues or questions:
