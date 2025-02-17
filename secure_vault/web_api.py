@@ -9,7 +9,7 @@ from typing import Dict, Optional
 import secrets
 import structlog
 import jwt
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from .vault import SecureVault
 
 logger = structlog.get_logger()
@@ -89,7 +89,7 @@ def authenticate():
     user_id = auth.username
     
     # Generate token with timezone-aware datetime
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     token = jwt.encode(
         {
             'sub': user_id,

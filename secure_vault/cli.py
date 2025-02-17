@@ -1,9 +1,6 @@
 import click
 from pathlib import Path
-import structlog
 from .vault import SecureVault
-
-logger = structlog.get_logger()
 
 @click.group()
 @click.option('--vault-dir', type=click.Path(), help='Vault directory location')
