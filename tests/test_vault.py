@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from secure_vault.vault import SecureVault
+from secure_vault.core.vault import SecureVault
 
 @pytest.fixture
 def temp_vault(tmp_path):

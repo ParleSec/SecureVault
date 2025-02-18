@@ -1,5 +1,5 @@
 import pytest
-from secure_vault.web_api import create_app
+from secure_vault.web.web_api import create_app
 import jwt
 import json
 import os

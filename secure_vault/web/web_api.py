@@ -1,3 +1,4 @@
+'''
 from flask import Flask, request, jsonify, send_file, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
@@ -238,3 +239,4 @@ def create_app(testing=False):
 if __name__ == '__main__':
     # In production, use proper WSGI server and HTTPS
     app.run(debug=False)
+    '''

@@ -40,6 +40,7 @@ htmlcov/
 
 # Project specific
 encrypted_vault/
-vault/
+demo_vault/
+temp_uploads/
 *.vault
 .env

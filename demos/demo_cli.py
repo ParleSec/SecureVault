@@ -1,15 +1,17 @@
 """
-Demo script showing how to use the Secure Vault CLI
+Demo script showing how to use the Secure Vault CLI with enhanced cleanup
 """
 
 import os
 import time
+import shutil
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress
 import subprocess
 import sys
+import atexit
 
 console = Console()
 
@@ -18,6 +20,72 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 # Create directories for test files and vault
 TEST_DIR = SCRIPT_DIR / "test_files"
 VAULT_DIR = SCRIPT_DIR / "vault"
+# Track all created files for cleanup
+ALL_CREATED_FILES = set()
+
+def register_file_for_cleanup(filepath):
+    """Register a file or directory for cleanup"""
+    ALL_CREATED_FILES.add(Path(filepath))
+
+def cleanup_files(show_output=True):
+    """Clean up all created files and directories"""
+    if show_output:
+        console.print("\n[bold blue]Cleaning up...[/bold blue]")
+
+    def remove_file(path):
+        """Remove a file with error handling"""
+        try:
+            if path.exists():
+                if path.is_file():
+                    path.unlink()
+                    if show_output:
+                        console.print(f"Removed file: {path}", style="green")
+                elif path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                    if show_output:
+                        console.print(f"Removed directory: {path}", style="green")
+        except Exception as e:
+            if show_output:
+                console.print(f"Warning: Could not remove {path}: {e}", style="yellow")
+
+    # Clean up all registered files
+    for filepath in ALL_CREATED_FILES:
+        remove_file(filepath)
+
+    # Clean up test files directory
+    if TEST_DIR.exists():
+        for file in TEST_DIR.glob("**/*"):
+            remove_file(file)
+        try:
+            TEST_DIR.rmdir()
+            if show_output:
+                console.print(f"Removed directory: {TEST_DIR}", style="green")
+        except Exception as e:
+            if show_output:
+                console.print(f"Warning: Could not remove test directory: {e}", style="yellow")
+
+    # Clean up vault directory
+    if VAULT_DIR.exists():
+        for file in VAULT_DIR.glob("**/*"):
+            remove_file(file)
+        try:
+            VAULT_DIR.rmdir()
+            if show_output:
+                console.print(f"Removed directory: {VAULT_DIR}", style="green")
+        except Exception as e:
+            if show_output:
+                console.print(f"Warning: Could not remove vault directory: {e}", style="yellow")
+
+    # Clean up any remaining decrypted files
+    for pattern in ["decrypted_*", "*.vault", "wrong.txt", "crypto_key.json"]:
+        for file in SCRIPT_DIR.glob(pattern):
+            remove_file(file)
+
+    # Clear the set of tracked files
+    ALL_CREATED_FILES.clear()
+
+    if show_output:
+        console.print("✓ Cleanup completed", style="green")
 
 def run_command(command):
     """Run a CLI command and return its output"""
@@ -28,9 +96,13 @@ def run_command(command):
 
 def create_test_files():
     """Create some test files for demonstration"""
-    # Create a directory for test files
+    # Create directories
     os.makedirs(TEST_DIR, exist_ok=True)
     os.makedirs(VAULT_DIR, exist_ok=True)
+    
+    # Register directories for cleanup
+    register_file_for_cleanup(TEST_DIR)
+    register_file_for_cleanup(VAULT_DIR)
     
     # Create test files of different sizes
     files = {
@@ -44,42 +116,13 @@ def create_test_files():
         path = TEST_DIR / filename
         with open(path, "w") as f:
             f.write(content)
-            created_files.append(path)
+        register_file_for_cleanup(path)
+        created_files.append(path)
             
     return created_files
 
-def cleanup_files():
-    """Clean up test files and artifacts"""
-    # Remove test files directory
-    if TEST_DIR.exists():
-        for file in TEST_DIR.glob("*"):
-            try:
-                file.unlink()
-            except Exception as e:
-                console.print(f"Warning: Could not delete {file}: {e}", style="yellow")
-        try:
-            TEST_DIR.rmdir()
-        except Exception as e:
-            console.print(f"Warning: Could not remove test directory: {e}", style="yellow")
-    
-    # Remove vault directory
-    if VAULT_DIR.exists():
-        for file in VAULT_DIR.glob("*"):
-            try:
-                file.unlink()
-            except Exception as e:
-                console.print(f"Warning: Could not delete {file}: {e}", style="yellow")
-        try:
-            VAULT_DIR.rmdir()
-        except Exception as e:
-            console.print(f"Warning: Could not remove vault directory: {e}", style="yellow")
-    
-    # Remove decrypted files
-    for file in SCRIPT_DIR.glob("decrypted_*"):
-        try:
-            file.unlink()
-        except Exception as e:
-            console.print(f"Warning: Could not delete {file}: {e}", style="yellow")
+# Register cleanup to run on normal exit and ctrl+c
+atexit.register(cleanup_files, show_output=False)
 
 def demo_cli():
     """Demonstrate CLI functionality"""
@@ -111,7 +154,9 @@ def demo_cli():
                 else:
                     console.print(output, style="green")
                     # Store the full path of encrypted file
-                    encrypted_files.append(VAULT_DIR / f"{filepath.stem}.vault")
+                    encrypted_path = VAULT_DIR / f"{filepath.stem}.vault"
+                    register_file_for_cleanup(encrypted_path)
+                    encrypted_files.append(encrypted_path)
                 
                 progress.advance(task)
         
@@ -125,14 +170,13 @@ def demo_cli():
         
         # Decrypt files
         console.print("\n[bold blue]Decrypting files:[/bold blue]")
-        decrypted_files = []
         with Progress() as progress:
             task = progress.add_task("Decrypting...", total=len(encrypted_files))
             
             for encrypted_path in encrypted_files:
                 console.print(f"\nDecrypting {encrypted_path}...")
-                # Remove .vault extension and add decrypted_ prefix
                 decrypted_path = SCRIPT_DIR / f"decrypted_{encrypted_path.stem}"
+                register_file_for_cleanup(decrypted_path)
                 
                 output, error = run_command(
                     f'decrypt "{encrypted_path}" "{decrypted_path}" --password "test123"'
@@ -142,7 +186,6 @@ def demo_cli():
                     console.print(f"Error: {error}", style="bold red")
                 else:
                     console.print(output, style="green")
-                    decrypted_files.append(decrypted_path)
                 
                 progress.advance(task)
         
@@ -164,11 +207,12 @@ def demo_cli():
         console.print("\n[bold blue]Testing wrong password:[/bold blue]")
         test_file = encrypted_files[0]
         wrong_output_path = SCRIPT_DIR / "wrong.txt"
+        register_file_for_cleanup(wrong_output_path)
+        
         output, error = run_command(
             f'decrypt "{test_file}" "{wrong_output_path}" --password "wrong_password"'
         )
         
-        # Check if decryption failed with wrong password
         if "Invalid password" in error or "Invalid password" in output:
             console.print("✓ Wrong password correctly rejected", style="green")
         else:
@@ -177,12 +221,10 @@ def demo_cli():
                 console.print(f"Error message: {error}", style="yellow")
             if output:
                 console.print(f"Output message: {output}", style="yellow")
-        
+    
     finally:
-        # Clean up
-        console.print("\n[bold blue]Cleaning up...[/bold blue]")
-        cleanup_files()
-        console.print("✓ Cleanup completed", style="green")
+        # Clean up with output
+        cleanup_files(show_output=True)
 
 if __name__ == "__main__":
     console.print(Panel("Secure Vault CLI Demo", style="bold blue"))
@@ -190,9 +232,9 @@ if __name__ == "__main__":
     
     try:
         demo_cli()
+    except KeyboardInterrupt:
+        console.print("\nDemo interrupted by user", style="yellow")
     except Exception as e:
         console.print(f"\nDemo failed: {str(e)}", style="bold red")
-        console.print("Cleaning up...", style="yellow")
-        cleanup_files()
     
     console.print("\nDemo completed!", style="bold green")

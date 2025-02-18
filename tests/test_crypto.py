@@ -1,5 +1,5 @@
 import pytest
-from secure_vault.crypto import CryptoManager, EncryptedData
+from secure_vault.core.crypto import CryptoManager, EncryptedData
 
 def test_encryption_decryption():
     crypto = CryptoManager()

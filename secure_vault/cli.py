@@ -1,6 +1,6 @@
 import click
 from pathlib import Path
-from .vault import SecureVault
+from .core.vault import SecureVault
 
 @click.group()
 @click.option('--vault-dir', type=click.Path(), help='Vault directory location')

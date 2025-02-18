@@ -14,8 +14,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 import base64
-from .secure_memory import SecureString, SecureBytes, ProtectedMemory
-from .secure_files import SecureFile
+from ..security.memory import SecureString, SecureBytes, ProtectedMemory
+from ..security.files import SecureFile
 
 logger = logging.getLogger(__name__)
 
