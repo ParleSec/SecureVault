@@ -43,4 +43,11 @@ encrypted_vault/
 demo_vault/
 temp_uploads/
 *.vault
-.env
+
+# Sensitive Paths
+*.key
+*.pem
+*.cer
+*.crt
+*.env
+*.log
