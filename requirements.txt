@@ -1,19 +1,36 @@
-cryptography>=41.0.0  # For encryption operations
-click>=8.0.0          # For CLI interface
-flask>=2.0.0          # For web API
-pytest>=7.0.0         # For testing
-pydantic>=2.0.0       # For data validation
-structlog>=23.0.0     # For logging
-python-dotenv>=1.0.0  # For environment variables
-PyJWT>=2.8.0          # For JWT authentication
-Werkzeug>=3.0.0       # For web utilities
-requests>=2.31.0      # For API requests
-rich>=13.0.0          # For console output formatting
-flask-cors>=4.0.0     # For CORS support in web API
-bcrypt>=4.0.1         # For password hashing
-gunicorn>=21.0.0      # For production web server (Linux/Mac)
-waitress>=2.1.2       # For production web server (Windows)
-pytest-cov>=4.1.0     # For test coverage reports
-black>=23.0.0         # For code formatting
-pylint>=3.0.0         # For code linting
-mypy>=1.0.0           # For type checking
+# Core dependencies
+cryptography>=41.0.0   # For encryption operations
+click>=8.0.0           # For CLI interface
+pydantic>=2.0.0        # For data validation
+structlog>=23.0.0      # For logging
+python-dotenv>=1.0.0   # For environment variables
+bcrypt>=4.0.1          # For password hashing
+rich>=13.0.0           # For console output formatting
+requests>=2.31.0       # For API requests
+
+# Web API dependencies
+flask>=2.0.0           # For web API
+Werkzeug>=3.0.0        # For web utilities
+PyJWT>=2.8.0           # For JWT authentication
+flask-cors>=4.0.0      # For CORS support
+flask-limiter>=3.3.0   # For rate limiting
+flask-talisman>=1.0.0  # For security headers
+flask-seasurf>=1.1.1   # For CSRF protection
+itsdangerous>=2.1.2    # For secure signing
+
+# Production servers
+gunicorn>=21.0.0       # For production web server (Linux/Mac)
+waitress>=2.1.2        # For production web server (Windows)
+
+# Testing and quality tools
+pytest>=7.0.0          # For testing
+pytest-cov>=4.1.0      # For test coverage reports
+black>=23.0.0          # For code formatting
+pylint>=3.0.0          # For code linting
+mypy>=1.0.0            # For type checking
+bandit>=1.7.5          # For security scanning
+safety>=2.3.5          # For dependency vulnerability checking
+
+# Optional monitoring/metrics
+prometheus-flask-exporter>=0.22.4  # For metrics collection
+python-memcached>=1.59             # For rate limiting storage (production)
