@@ -4,7 +4,7 @@ HTTPS enforcement and secure headers middleware
 
 from flask import Flask, request, redirect, abort, Response
 import logging
-from typing import Optional, Dict, Any, List, Callable, Union
+from typing import Optional, Dict, Any, List, Callable, Union, Tuple
 from functools import wraps
 import re
 import ssl
