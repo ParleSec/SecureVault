@@ -1,6 +1,6 @@
 # SecureVault
 
-A secure file encryption system implementing modern cryptographic principles and security best practices. Features both GUI and API interfaces for secure file management.
+A secure file encryption system implementing modern cryptographic principles and security best practices. Features CLI, GUI and API interfaces for secure file management.
 
 ## Features
 
@@ -27,18 +27,15 @@ A secure file encryption system implementing modern cryptographic principles and
 
 ```bash
 # Clone the repository
-git clone https://github.com/YourUsername/SecureVault
+git clone https://github.com/ParleSec/SecureVault
 cd SecureVault
 
-# Create virtual environment
+# (optional) Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Build the application
-python build_securevault.py
 ```
 
 ## Quick Start
@@ -115,7 +112,7 @@ securevault/
 │   ├── security/           # Security features
 │   └── utils/              # Utilities
 ├── tests/                  # Test suites
-└── examples/               # Usage examples
+└── demos/                  # Usage examples
 ```
 
 ## Testing
