@@ -16,7 +16,7 @@ A homebrewed secure file encryption system implementing modern cryptographic pri
 
 ```bash
 # Clone the repository
-git clone https://github.com/Bobfrog93/SecureVault
+git clone https://github.com/ParleSec/SecureVault
 cd SecureVault
 
 # Install dependencies
