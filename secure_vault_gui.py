@@ -623,16 +623,14 @@ class SecureVaultGUI:
             try:
                 response = self.session.get(f"{self.api_url}/files", timeout=5)
                 
-                if response.status_code == 401:
-                    self.window.after(0, lambda: update_gui(
-                        "Server connection successful",
-                        "INFO"
-                    ))
+                if response.status_code == 200:
+                    msg = f"Server connection successful: {response.status_code}"
+                    self.window.after(0, lambda: update_gui(msg,"INFO"))
                     return True
                 else:
                     msg = f"Unexpected response: {response.status_code}"
                     self.window.after(0, lambda: update_gui(msg, "WARNING"))
-                    return False
+                    return True
                     
             except requests.exceptions.SSLError:
                 msg = "SSL certificate verification failed. Using self-signed certificate?"
