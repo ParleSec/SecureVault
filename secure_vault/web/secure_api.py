@@ -14,7 +14,7 @@ import time
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
-import jwt
+from jose import jwt
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
