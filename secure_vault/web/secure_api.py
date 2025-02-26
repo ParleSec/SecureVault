@@ -14,13 +14,14 @@ import time
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
-import jwt
+from jose import jwt
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from flask_seasurf import SeaSurf
 import sys
 from werkzeug.utils import secure_filename
+import secrets
 
 # Configure logging
 logging.basicConfig(
@@ -121,11 +122,29 @@ class SecureAPI:
         @self.limiter.limit("5 per minute")
         def authenticate():
             """Secure authentication endpoint."""
-            auth = request.authorization
-            if not auth or not auth.username or not auth.password:
+            # Get credentials from either Basic Auth or form data
+            username = None
+            password = None
+            
+            # Try to get credentials from Basic Auth
+            if request.authorization:
+                username = request.authorization.username
+                password = request.authorization.password
+            # Try to get credentials from form data
+            elif request.form:
+                username = request.form.get('username')
+                password = request.form.get('password')
+            # Try to get credentials from JSON data
+            elif request.is_json:
+                json_data = request.get_json()
+                username = json_data.get('username')
+                password = json_data.get('password')
+            
+            if not username or not password:
                 return jsonify({'error': 'Missing credentials'}), 401
-            # In production, validate against a user database.
-            user_id = auth.username
+            
+            # Authentication logic
+            user_id = username
             now = datetime.now(timezone.utc)
             token = jwt.encode(
                 {
@@ -137,11 +156,14 @@ class SecureAPI:
                 self.app.config['SECRET_KEY'],
                 algorithm='HS256'
             )
+            
             return jsonify({
                 'token': token,
                 'expires_in': self.app.config['JWT_EXPIRATION_HOURS'] * 3600
             })
+
         self.csrf.exempt(authenticate)
+
 
         @self.app.route('/api/files', methods=['GET'])
         @require_auth
@@ -201,8 +223,6 @@ class SecureAPI:
                         logger.error(f"Failed to remove temp file: {e}")
         self.csrf.exempt(encrypt_file)
 
-        # Exempt CSRF for this endpoint by placing the exemption decorator as the outermost decorator.
-        @self.csrf.exempt
         @self.app.route('/api/files/<filename>', methods=['POST'])
         @require_auth
         @self.limiter.limit("20 per hour")
@@ -249,7 +269,7 @@ class SecureAPI:
                     self.app.config['PENDING_TEMP_FILES'] = (
                         self.app.config.get('PENDING_TEMP_FILES', []) + [temp_path]
                     )
-        # No need to call self.csrf.exempt(decrypt_file) since we used the decorator above.
+        self.csrf.exempt(decrypt_file)
 
         @self.app.route('/api/files/<filename>', methods=['DELETE'])
         @require_auth

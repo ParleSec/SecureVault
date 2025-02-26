@@ -3,6 +3,7 @@ SecureVault GUI
 A secure file encryption application with integrated API server management.
 """
 
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
@@ -19,7 +20,11 @@ import signal
 import time
 import logging
 from datetime import datetime, timezone
+import secrets
 import atexit
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent))  # Add the current directory to Python path
+from secure_vault.users.login_manager import LoginManager
 
 # Configure logging
 logging.basicConfig(
@@ -171,12 +176,23 @@ class APIServerManager:
                 self.server_process = None
 
 class SecureVaultGUI:
-    """Main GUI class for SecureVault"""
+    """Initialize the GUI"""
     def __init__(self):
-        """Initialize the GUI"""
         # Create the main window first
         self.window = tk.Tk()
         self.window.withdraw()  # Hide main window initially
+        
+        # Initialize login manager
+        self.data_dir = Path("./secure_vault_data")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        users_dir = self.data_dir / "users"
+        users_dir.mkdir(parents=True, exist_ok=True)
+        self.login_manager = LoginManager(str(users_dir / "users.db"))
+        
+        # For user session tracking
+        self.username = None
+        self.last_activity_time = time.time()
+        self.session_timeout = 30 * 60  # 30 minutes in seconds
         
         # Create loading window as a Toplevel
         self.loading_window = self._create_loading_window()
@@ -229,11 +245,17 @@ class SecureVaultGUI:
         # Setup auto-refresh
         self._setup_auto_refresh()
         
+        # Check server and login
+        self.check_server_connection()
+
+        # Setup session monitoring
+        self._setup_session_monitoring()
+        
         # Show the main window
         self.window.deiconify()
         
-        # Check server and login
-        self.check_server_connection()
+        # Show login dialog instead of the original login screen
+        self.login_manager.show_login_dialog(self.window, self.on_login_success)
 
     def initialize_server(self):
         """Initialize and check API server"""
@@ -462,6 +484,7 @@ class SecureVaultGUI:
         server_frame = ttk.LabelFrame(self.settings_tab, text="Server Settings", padding="10")
         server_frame.pack(fill=tk.X, pady=10)
         
+        # Use a grid layout for server settings
         ttk.Label(server_frame, text="API URL:").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.server_url_var = tk.StringVar(value=self.api_url)
         ttk.Entry(
@@ -489,13 +512,17 @@ class SecureVaultGUI:
         security_frame = ttk.LabelFrame(self.settings_tab, text="Security Settings", padding="10")
         security_frame.pack(fill=tk.X, pady=10)
         
+        # Use a consistent geometry manager - grid layout for security settings
+        security_grid = ttk.Frame(security_frame)
+        security_grid.pack(fill=tk.X, expand=True)
+        
         # Auto-logout timer
-        ttk.Label(security_frame, text="Auto-logout after inactivity (minutes):").grid(
+        ttk.Label(security_grid, text="Auto-logout after inactivity (minutes):").grid(
             row=0, column=0, sticky=tk.W, pady=5
         )
         self.auto_logout_var = tk.IntVar(value=30)
         ttk.Spinbox(
-            security_frame,
+            security_grid,
             from_=5,
             to=120,
             textvariable=self.auto_logout_var,
@@ -505,10 +532,24 @@ class SecureVaultGUI:
         # Remember credentials
         self.remember_creds_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            security_frame,
+            security_grid,
             text="Remember username",
             variable=self.remember_creds_var
         ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+        
+        # User settings - only show when logged in
+        if hasattr(self, 'username') and self.username:
+            user_frame = ttk.LabelFrame(security_frame, text="User Account", padding="10")
+            user_frame.pack(fill=tk.X, pady=10)
+            
+            # Use pack for the user account section
+            ttk.Label(user_frame, text=f"Logged in as: {self.username}").pack(anchor=tk.W, pady=5)
+            
+            ttk.Button(
+                user_frame,
+                text="Change Password",
+                command=self.show_change_password_dialog
+            ).pack(pady=5)
         
         # Save settings button
         ttk.Button(
@@ -517,6 +558,8 @@ class SecureVaultGUI:
             command=self.save_settings,
             style='Primary.TButton'
         ).pack(pady=20)
+        
+
 
     def setup_logs_tab(self):
         """Set up the logs tab"""
@@ -555,7 +598,7 @@ class SecureVaultGUI:
         ).pack(side=tk.RIGHT, padx=5)
 
     def setup_login_frame(self):
-        """Set up the login frame"""
+        """Set up the login frame (used as a fallback only)"""
         # Title
         title_label = ttk.Label(
             self.login_frame,
@@ -564,32 +607,19 @@ class SecureVaultGUI:
         )
         title_label.pack(pady=20)
         
-        # Login form
-        login_form = ttk.Frame(self.login_frame)
-        login_form.pack(pady=20)
+        # Message about using the custom login dialog
+        message_label = ttk.Label(
+            self.login_frame,
+            text="Please use the secure login dialog.\nIf it doesn't appear, click the button below.",
+            justify=tk.CENTER
+        )
+        message_label.pack(pady=20)
         
-        ttk.Label(login_form, text="Username:").grid(row=0, column=0, sticky=tk.W, pady=10)
-        self.username_var = tk.StringVar()
-        ttk.Entry(
-            login_form,
-            textvariable=self.username_var,
-            width=30
-        ).grid(row=0, column=1, sticky=tk.W, pady=10)
-        
-        ttk.Label(login_form, text="Password:").grid(row=1, column=0, sticky=tk.W, pady=10)
-        self.password_var = tk.StringVar()
-        ttk.Entry(
-            login_form,
-            textvariable=self.password_var,
-            show="*",
-            width=30
-        ).grid(row=1, column=1, sticky=tk.W, pady=10)
-        
-        # Login button
+        # Button to show login dialog
         ttk.Button(
             self.login_frame,
-            text="Login",
-            command=self.login,
+            text="Show Login Dialog",
+            command=lambda: self.login_manager.show_login_dialog(self.window, self.on_login_success),
             style='Primary.TButton'
         ).pack(pady=20)
         
@@ -650,47 +680,165 @@ class SecureVaultGUI:
         # Run in thread
         threading.Thread(target=check_connection, daemon=True).start()
 
-    def login(self):
-        """Login to the API server"""
-        username = self.username_var.get()
-        password = self.password_var.get()
+    def _setup_session_monitoring(self):
+        """Monitor user session and implement timeout"""
+        def check_session():
+            if self.token:  # Only check if logged in
+                if time.time() - self.last_activity_time > self.session_timeout:
+                    self.log_message("Session timeout - logging out", "INFO")
+                    self.window.after(0, self.logout)
+            self.window.after(60000, check_session)  # Check every minute
         
-        if not username or not password:
-            self.login_status_var.set("Username and password are required")
-            return
+        self.window.after(60000, check_session)
+
+    def _update_activity_time(self):
+        """Update the last activity timestamp"""
+        self.last_activity_time = time.time()
+        # Also refresh the login manager session
+        if hasattr(self, 'login_manager'):
+            self.login_manager.refresh_session()
+
+    def on_login_success(self, user_info):
+        """Handle successful login."""
+        self.username = user_info["username"]
+        self.log_message(f"User {self.username} authenticated locally", "INFO")
         
-        self.status_var.set("Logging in...")
-        self.login_status_var.set("Authenticating...")
+        # Update last activity time
+        self._update_activity_time()
+        
+        # After local authentication, get token from API server
+        self.login_with_api(user_info.get("api_key"))
+
+    def login_with_api(self, api_key=None):
+        """Login to the API server with current credentials."""
+        self.status_var.set("Logging in to API...")
+        
+        # Store api_key in a container that can be accessed from the nested function
+        auth_data = {'api_key': api_key}
         
         def perform_login():
             try:
+                # Use API key if provided, otherwise generate a new one
+                if not auth_data['api_key']:
+                    import secrets
+                    auth_data['api_key'] = f"sk_securevault_{secrets.token_hex(16)}"
+                
+                # Step 1: First get a CSRF token by making a GET request
+                self.log_message("Getting CSRF token from server...", "INFO")
+                
+                # Clear existing cookies to start fresh
+                self.session.cookies.clear()
+                
+                try:
+                    # Make a GET request to get CSRF cookie
+                    self.session.get(
+                        f"{self.api_url}/files", 
+                        timeout=5,
+                        verify=False
+                    )
+                    
+                    # Extract CSRF token from cookies
+                    csrf_token = None
+                    for cookie in self.session.cookies:
+                        if 'csrf' in cookie.name.lower():
+                            csrf_token = cookie.value
+                            self.log_message(f"Found CSRF token in cookie: {cookie.name}", "INFO")
+                            break
+                    
+                    if not csrf_token:
+                        self.log_message("No CSRF token found in cookies", "WARNING")
+                except Exception as e:
+                    self.log_message(f"Error getting CSRF token: {e}", "WARNING")
+                    csrf_token = None
+                
+                # Step 2: Make the auth request with the CSRF token
+                self.log_message("Attempting API authentication with CSRF token...", "INFO")
+                
+                headers = {
+                    'X-CSRFToken': csrf_token if csrf_token else '',
+                    'X-Requested-With': 'XMLHttpRequest',  # This helps identify AJAX requests
+                    'Referer': 'https://localhost:5000/',  # Required for CSRF validation
+                    'Origin': 'https://localhost:5000'  # Required for CSRF validation
+                }
+                
+                # Create form data with CSRF token
+                form_data = {
+                    'username': self.username,
+                    'password': auth_data['api_key']
+                }
+                
+                # Add CSRF token to form data if available
+                if csrf_token:
+                    form_data['csrf_token'] = csrf_token
+                
+                # Make the auth request with proper CSRF handling
                 response = self.session.post(
                     f"{self.api_url}/auth",
-                    auth=(username, password)
+                    data=form_data,
+                    headers=headers,
+                    verify=False,
+                    auth=(self.username, auth_data['api_key'])  # Include as both auth and form data
                 )
                 
+                # Handle the response
                 if response.status_code == 200:
                     data = response.json()
                     self.token = data.get('token')
                     if self.token:
                         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
-                        self.log_message(f"User {username} logged in successfully", "INFO")
+                        self.log_message(f"User {self.username} logged in to API successfully", "INFO")
                         
                         # Switch to main interface
                         self.window.after(0, self.show_main_interface)
                     else:
                         self.login_status_var.set("Invalid response from server")
-                        self.log_message("Login failed: Invalid response from server", "ERROR")
+                        self.log_message("API login failed: Invalid response from server", "ERROR")
+                        self.window.after(0, lambda: self.login_manager.show_login_dialog(self.window, self.on_login_success))
                 else:
-                    self.login_status_var.set(f"Login failed: {response.status_code}")
-                    self.log_message(f"Login failed: {response.status_code} - {response.text}", "ERROR")
+                    # Log detailed error information for debugging
+                    self.log_message(f"API login failed: {response.status_code}", "ERROR")
+                    self.log_message(f"Response text: {response.text}", "ERROR")
+                    self.log_message(f"CSRF token used: {csrf_token}", "INFO")
+                    self.log_message(f"Headers sent: {headers}", "INFO")
+                    
+                    # Extract error message if available
+                    error_msg = f"API login failed: {response.status_code}"
+                    try:
+                        error_details = response.json().get('error', '')
+                        if error_details:
+                            error_msg += f" - {error_details}"
+                    except:
+                        pass
+                    
+                    self.login_status_var.set(error_msg)
+                    self.window.after(0, lambda: self.login_manager.show_login_dialog(self.window, self.on_login_success))
                     
             except Exception as e:
-                self.login_status_var.set(f"Login error: {str(e)}")
-                self.log_message(f"Login error: {str(e)}", "ERROR")
+                self.login_status_var.set(f"API login error: {str(e)}")
+                self.log_message(f"API login error: {str(e)}", "ERROR")
+                self.window.after(0, lambda: self.login_manager.show_login_dialog(self.window, self.on_login_success))
         
         # Run in thread to avoid freezing UI
         threading.Thread(target=perform_login).start()
+
+    def login(self):
+        """Legacy login method - redirects to the secure login dialog"""
+        self.login_manager.show_login_dialog(self.window, self.on_login_success)
+
+
+    def show_change_password_dialog(self):
+        """Show dialog to change user password"""
+        if not hasattr(self, 'username') or not self.username:
+            messagebox.showwarning("Error", "You must be logged in to change your password.")
+            return
+            
+        self.login_manager.show_change_password_dialog(
+            self.window, 
+            self.username,
+            lambda: messagebox.showinfo("Password Changed", "Your password has been changed successfully.")
+        )
+
+
 
     def show_main_interface(self):
         """Show the main interface after successful login"""
@@ -703,6 +851,7 @@ class SecureVaultGUI:
 
     def refresh_file_list(self):
         """Get list of files from the server"""
+        self._update_activity_time()
         self.status_var.set("Refreshing file list...")
         self.file_listbox.delete(0, tk.END)
         
@@ -744,6 +893,7 @@ class SecureVaultGUI:
 
     def on_file_select(self, event):
         """Handle file selection from listbox"""
+        self._update_activity_time()
         selection = self.file_listbox.curselection()
         if not selection:
             return
@@ -794,6 +944,7 @@ class SecureVaultGUI:
 
     def encrypt_file(self):
         """Select and encrypt a file"""
+        self._update_activity_time()
         file_path = filedialog.askopenfilename(title="Select File to Encrypt")
         if not file_path:
             return
@@ -847,6 +998,7 @@ class SecureVaultGUI:
 
     def decrypt_file(self):
         """Decrypt the selected file"""
+        self._update_activity_time()
         selection = self.file_listbox.curselection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a file to decrypt")
@@ -910,6 +1062,7 @@ class SecureVaultGUI:
 
     def delete_file(self):
         """Delete the selected file"""
+        self._update_activity_time()
         selection = self.file_listbox.curselection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a file to delete")
@@ -1031,6 +1184,10 @@ class SecureVaultGUI:
                 self.token = None
                 self.session.headers.pop('Authorization', None)
                 
+                # Clear local user session
+                self.login_manager.logout()
+                self.username = None
+                
                 # Log result
                 if response.status_code == 200:
                     self.log_message("Logged out successfully", "INFO")
@@ -1048,11 +1205,21 @@ class SecureVaultGUI:
 
     def show_login_screen(self):
         """Show the login screen"""
+        # Clear current session data
+        self.token = None
+        if hasattr(self, 'session') and hasattr(self.session, 'headers'):
+            self.session.headers.pop('Authorization', None)
+        
+        # Clear main frame
         self.main_frame.pack_forget()
-        self.login_frame.pack(fill=tk.BOTH, expand=True)
-        self.password_var.set("")  # Clear password
+        
+        # Update login status
         self.login_status_var.set("")
         self.status_var.set("Please login")
+        
+        # Show login dialog
+        self.login_manager.logout()
+        self.login_manager.show_login_dialog(self.window, self.on_login_success)
 
     def password_dialog(self, prompt: str) -> str:
         """Show password dialog and return the entered password"""
