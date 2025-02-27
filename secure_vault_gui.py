@@ -392,12 +392,12 @@ class SecureVaultGUI:
         left_frame = ttk.LabelFrame(self.files_paned, text="Encrypted Files", padding="5")
         self.files_paned.add(left_frame, weight=1)
         
-        # File listbox with scrollbar
+        # File listbox with scrollbar - CHANGED TO MULTIPLE SELECTION
         self.file_listbox = tk.Listbox(
             left_frame, 
             width=40,
             activestyle='dotbox',
-            selectmode=tk.SINGLE,
+            selectmode=tk.EXTENDED,  # Changed from SINGLE to EXTENDED
             bg=self.colors['background'],
             fg=self.colors['text']
         )
@@ -411,6 +411,15 @@ class SecureVaultGUI:
         )
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.file_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        # Add a label to indicate multiple selection
+        selection_hint = ttk.Label(
+            left_frame, 
+            text="Ctrl+click or Shift+click to select multiple files",
+            font=("Arial", 8),
+            foreground="#666666"
+        )
+        selection_hint.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
         
         # Right panel (file details and actions)
         right_frame = ttk.Frame(self.files_paned)
@@ -434,6 +443,16 @@ class SecureVaultGUI:
         ttk.Label(self.details_frame, text="Modified:").grid(row=2, column=0, sticky=tk.W, pady=2)
         ttk.Label(self.details_frame, textvariable=self.modified_var).grid(row=2, column=1, sticky=tk.W, pady=2)
         
+        # Selection info (NEW)
+        self.selection_info_var = tk.StringVar()
+        self.selection_info_label = ttk.Label(
+            right_frame,
+            textvariable=self.selection_info_var,
+            font=("Arial", 9, "italic"),
+            foreground="#666666"
+        )
+        self.selection_info_label.pack(fill=tk.X, pady=(0, 5))
+        
         # Actions section
         actions_frame = ttk.LabelFrame(right_frame, text="Actions", padding="10")
         actions_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -442,41 +461,45 @@ class SecureVaultGUI:
         encrypt_frame = ttk.LabelFrame(actions_frame, text="Encrypt File", padding="10")
         encrypt_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Button(
+        self.encrypt_button = ttk.Button(
             encrypt_frame,
             text="Select File to Encrypt",
             command=self.encrypt_file,
             style='Primary.TButton'
-        ).pack(pady=5)
+        )
+        self.encrypt_button.pack(pady=5)
         
         # Decrypt section
         decrypt_frame = ttk.LabelFrame(actions_frame, text="Decrypt Selected File", padding="10")
         decrypt_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Button(
+        self.decrypt_button = ttk.Button(
             decrypt_frame,
             text="Decrypt File",
             command=self.decrypt_file,
             style='Success.TButton'
-        ).pack(pady=5)
+        )
+        self.decrypt_button.pack(pady=5)
         
         # Delete section
-        delete_frame = ttk.LabelFrame(actions_frame, text="Delete Selected File", padding="10")
+        delete_frame = ttk.LabelFrame(actions_frame, text="Delete Selected File(s)", padding="10")  # Updated label
         delete_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Button(
+        self.delete_button = ttk.Button(
             delete_frame,
-            text="Delete File",
+            text="Delete File(s)",  # Updated label
             command=self.delete_file,
             style='Warning.TButton'
-        ).pack(pady=5)
+        )
+        self.delete_button.pack(pady=5)
         
         # Refresh button
-        ttk.Button(
+        self.refresh_button = ttk.Button(
             actions_frame,
             text="Refresh File List",
             command=self.refresh_file_list
-        ).pack(pady=20)
+        )
+        self.refresh_button.pack(pady=20)
 
     def setup_settings_tab(self):
         """Set up the settings tab"""
@@ -855,6 +878,16 @@ class SecureVaultGUI:
         self.status_var.set("Refreshing file list...")
         self.file_listbox.delete(0, tk.END)
         
+        # Reset UI state
+        self.filename_var.set("")
+        self.size_var.set("")
+        self.modified_var.set("")
+        self.selection_info_var.set("")
+        
+        # Disable action buttons until a file is selected
+        self.decrypt_button.config(state=tk.DISABLED)
+        self.delete_button.config(state=tk.DISABLED)
+        
         def fetch_files():
             try:
                 response = self.session.get(f"{self.api_url}/files")
@@ -895,14 +928,54 @@ class SecureVaultGUI:
         """Handle file selection from listbox"""
         self._update_activity_time()
         selection = self.file_listbox.curselection()
+        
+        # Clear details if no selection
         if not selection:
-            return
+            self.filename_var.set("")
+            self.size_var.set("")
+            self.modified_var.set("")
+            self.selection_info_var.set("")
             
+            # Disable action buttons that require selection
+            self.decrypt_button.config(state=tk.DISABLED)
+            self.delete_button.config(state=tk.DISABLED)
+            return
+        
+        # Store selection count for easier access
+        selection_count = len(selection)
+        
+        # Update buttons and info based on selection count
+        if selection_count > 1:
+            # Multiple files selected - only allow deletion
+            self.decrypt_button.config(state=tk.DISABLED)
+            self.delete_button.config(state=tk.NORMAL)
+            
+            # Update selection info
+            self.selection_info_var.set(f"{selection_count} files selected. Only deletion is available for multiple files.")
+            
+            # Clear details panel
+            self.filename_var.set("")
+            self.size_var.set("")
+            self.modified_var.set("")
+            
+            # Update status
+            self.status_var.set(f"{selection_count} files selected")
+            return
+        
+        # Single file selected - enable all actions
         file_name = self.file_listbox.get(selection[0])
         if file_name == "(No files found)":
+            self.decrypt_button.config(state=tk.DISABLED)
+            self.delete_button.config(state=tk.DISABLED)
+            self.selection_info_var.set("")
             return
-            
-        # Find file details from API
+        
+        # Enable buttons for single file
+        self.decrypt_button.config(state=tk.NORMAL)
+        self.delete_button.config(state=tk.NORMAL)
+        self.selection_info_var.set("")
+        
+        # Find file details from API (existing code)
         def fetch_file_details():
             try:
                 response = self.session.get(f"{self.api_url}/files")
@@ -1061,54 +1134,269 @@ class SecureVaultGUI:
         threading.Thread(target=perform_decryption).start()
 
     def delete_file(self):
-        """Delete the selected file"""
+        """Delete selected file(s) with password confirmation"""
         self._update_activity_time()
+        
+        # Check if any files are selected
         selection = self.file_listbox.curselection()
         if not selection:
-            messagebox.showwarning("Warning", "Please select a file to delete")
+            messagebox.showwarning("Warning", "Please select file(s) to delete")
             return
-            
-        file_name = self.file_listbox.get(selection[0])
-        if file_name == "(No files found)":
+        
+        # Get all selected file names
+        selected_files = [self.file_listbox.get(idx) for idx in selection]
+        
+        # Filter out any "(No files found)" entries
+        selected_files = [f for f in selected_files if f != "(No files found)"]
+        
+        if not selected_files:
             return
-            
-        # Confirm deletion
+        
+        # Prepare confirmation message based on number of files
+        if len(selected_files) == 1:
+            confirm_msg = f"Are you sure you want to delete {selected_files[0]}?\nThis cannot be undone."
+        else:
+            confirm_msg = f"Are you sure you want to delete these {len(selected_files)} files?\n\n"
+            # Show up to 5 filenames to avoid huge dialogs
+            for i, file in enumerate(selected_files[:5]):
+                confirm_msg += f"• {file}\n"
+            if len(selected_files) > 5:
+                confirm_msg += f"• ... and {len(selected_files) - 5} more\n"
+            confirm_msg += "\nThis action cannot be undone."
+        
+        # First confirmation dialog
         if not messagebox.askyesno(
             "Confirm Delete",
-            f"Are you sure you want to delete {file_name}?\nThis cannot be undone."
+            confirm_msg
         ):
             return
+        
+        # Password confirmation dialog - with message depending on number of files
+        if len(selected_files) == 1:
+            prompt = f"Enter your password to confirm deletion of {selected_files[0]}"
+        else:
+            prompt = f"Enter your password to confirm deletion of {len(selected_files)} files"
+        
+        password = self.secure_password_dialog(
+            prompt, 
+            "Secure Delete Confirmation"
+        )
+        
+        # If the user cancels or doesn't provide a password, abort deletion
+        if not password:
+            self.log_message("File deletion canceled: No password provided", "INFO")
+            return
+        
+        # Verify the password before proceeding
+        success, _ = self.login_manager.authenticate(self.username, password)
+        if not success:
+            messagebox.showerror(
+                "Authentication Failed", 
+                "Incorrect password. For security reasons, file deletion requires your password."
+            )
+            self.log_message("File deletion denied: Invalid password", "WARNING")
+            return
+        
+        # Password verified, proceed with deletion
+        self.status_var.set(f"Deleting {len(selected_files)} file(s)...")
+        self.log_message(f"Delete operation authorized for {len(selected_files)} file(s)", "INFO")
+        
+        # Create a progress dialog for multiple files
+        if len(selected_files) > 1:
+            progress_dialog = tk.Toplevel(self.window)
+            progress_dialog.title("Deleting Files")
+            progress_dialog.geometry("400x150")
+            progress_dialog.transient(self.window)
+            progress_dialog.grab_set()
+            progress_dialog.resizable(False, False)
+            self.center_window(progress_dialog)
             
-        self.status_var.set("Deleting file...")
+            ttk.Label(
+                progress_dialog, 
+                text=f"Deleting {len(selected_files)} files...", 
+                font=("Arial", 10, "bold")
+            ).pack(pady=(20, 10))
+            
+            progress_var = tk.DoubleVar()
+            progress_bar = ttk.Progressbar(
+                progress_dialog, 
+                orient=tk.HORIZONTAL, 
+                length=350, 
+                variable=progress_var,
+                maximum=len(selected_files)
+            )
+            progress_bar.pack(pady=10, padx=20)
+            
+            status_var = tk.StringVar(value="Starting...")
+            status_label = ttk.Label(progress_dialog, textvariable=status_var)
+            status_label.pack(pady=10)
+        else:
+            progress_dialog = None
+            progress_var = None
+            status_var = None
         
         def perform_deletion():
+            success_count = 0
+            failed_files = []
+            
             try:
-                response = self.session.delete(f"{self.api_url}/files/{file_name}")
-                
-                if response.status_code == 200:
-                    # Update UI in main thread
-                    def update_after_delete():
-                        self.refresh_file_list()
-                        messagebox.showinfo("Success", "File deleted successfully!")
-                        self.status_var.set("File deleted successfully")
-                        self.log_message(f"Deleted file: {file_name}", "INFO")
+                for i, file_name in enumerate(selected_files):
+                    try:
+                        # Update progress dialog if it exists
+                        if progress_dialog and progress_dialog.winfo_exists():
+                            progress_var.set(i)
+                            status_var.set(f"Deleting: {file_name}")
+                            progress_dialog.update()
                         
-                    self.window.after(0, update_after_delete)
+                        # Delete the file
+                        response = self.session.delete(f"{self.api_url}/files/{file_name}")
+                        
+                        if response.status_code == 200:
+                            success_count += 1
+                            self.log_message(f"Deleted file: {file_name}", "INFO")
+                        else:
+                            failed_files.append((file_name, f"Status code: {response.status_code}"))
+                            self.log_message(f"Failed to delete {file_name}: {response.status_code} - {response.text}", "ERROR")
                     
-                else:
-                    error_msg = f"Deletion failed: {response.status_code}"
-                    self.log_message(f"{error_msg} - {response.text}", "ERROR")
-                    self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
-                    self.status_var.set("Deletion failed")
+                    except Exception as e:
+                        failed_files.append((file_name, str(e)))
+                        self.log_message(f"Error deleting {file_name}: {e}", "ERROR")
+                
+                # Close progress dialog if it exists and is still open
+                if progress_dialog and progress_dialog.winfo_exists():
+                    progress_dialog.destroy()
+                
+                # Update UI in main thread with results
+                def update_after_delete():
+                    self.refresh_file_list()
+                    
+                    if failed_files:
+                        # Some files failed - show detailed error
+                        error_message = f"Successfully deleted {success_count} file(s), but {len(failed_files)} file(s) failed:\n\n"
+                        for name, error in failed_files[:5]:  # Show up to 5 errors
+                            error_message += f"• {name}: {error}\n"
+                        if len(failed_files) > 5:
+                            error_message += f"• ... and {len(failed_files) - 5} more\n"
+                        
+                        messagebox.showerror("Partial Success", error_message)
+                        self.status_var.set(f"Deleted {success_count}/{len(selected_files)} files")
+                        
+                    elif success_count == len(selected_files):
+                        # All files deleted successfully
+                        if len(selected_files) == 1:
+                            messagebox.showinfo("Success", "File deleted successfully!")
+                        else:
+                            messagebox.showinfo("Success", f"All {len(selected_files)} files deleted successfully!")
+                        
+                        self.status_var.set(f"Successfully deleted {success_count} file(s)")
+                    
+                self.window.after(0, update_after_delete)
                     
             except Exception as e:
+                # Handle any unexpected errors
+                if progress_dialog and progress_dialog.winfo_exists():
+                    progress_dialog.destroy()
+                    
                 error_msg = f"Deletion error: {str(e)}"
                 self.log_message(error_msg, "ERROR")
                 self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
                 self.status_var.set("Deletion error")
         
-        # Run in thread
+        # Run in thread to avoid freezing UI
         threading.Thread(target=perform_deletion).start()
+
+
+    def secure_password_dialog(self, prompt: str, title: str = "Password Required") -> str:
+        """
+        Show a secure password entry dialog with tight security focus.
+        
+        Args:
+            prompt: The message to display
+            title: The dialog title
+            
+        Returns:
+            str: The entered password or None if canceled
+        """
+        dialog = tk.Toplevel(self.window)
+        dialog.title(title)
+        dialog.geometry("400x200")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # Set security icon
+        try:
+            # If you have a security icon, uncomment this
+            # dialog.iconbitmap('resources/security.ico')
+            pass
+        except:
+            pass  # Icon failed to load, continue anyway
+        
+        # Center dialog
+        self.center_window(dialog)
+        
+        # Security icon or warning symbol
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Add red security warning text at top
+        security_label = ttk.Label(
+            frame, 
+            text="⚠️ SECURITY VERIFICATION REQUIRED", 
+            foreground="#e74c3c",
+            font=("Arial", 10, "bold")
+        )
+        security_label.pack(pady=(5, 15))
+        
+        # Add prompt
+        message_label = ttk.Label(frame, text=prompt, wraplength=350, justify=tk.CENTER)
+        message_label.pack(pady=5)
+        
+        # Password entry
+        password_frame = ttk.Frame(frame)
+        password_frame.pack(pady=10, fill=tk.X)
+        
+        ttk.Label(password_frame, text="Password:").pack(side=tk.LEFT, padx=(30, 5))
+        password_var = tk.StringVar()
+        password_entry = ttk.Entry(password_frame, show="●", textvariable=password_var, width=25)
+        password_entry.pack(side=tk.LEFT, padx=5)
+        
+        result = [None]  # Use list to store result
+        
+        def on_ok():
+            result[0] = password_var.get()
+            dialog.destroy()
+            
+        def on_cancel():
+            dialog.destroy()
+        
+        # Button frame
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(
+            button_frame, 
+            text="Cancel", 
+            command=on_cancel
+        ).pack(side=tk.RIGHT, padx=10)
+        
+        ttk.Button(
+            button_frame, 
+            text="Confirm", 
+            command=on_ok, 
+            style='Primary.TButton'
+        ).pack(side=tk.RIGHT, padx=10)
+        
+        # Bind Enter key to OK button
+        dialog.bind('<Return>', lambda event: on_ok())
+        dialog.bind('<Escape>', lambda event: on_cancel())
+        
+        # Set focus to the password entry
+        password_entry.focus_set()
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        return result[0]
 
     def update_ssl_settings(self):
         """Update SSL verification settings"""
