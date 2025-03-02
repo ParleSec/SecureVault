@@ -230,6 +230,8 @@ class LoginManager:
             success, result = self.authenticate(username, password)
             
             if success:
+                # Add the actual password to the result for API authentication
+                result["password"] = password
                 login_dialog.destroy()
                 if on_success:
                     on_success(result)

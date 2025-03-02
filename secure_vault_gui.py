@@ -726,81 +726,40 @@ class SecureVaultGUI:
         self.username = user_info["username"]
         self.log_message(f"User {self.username} authenticated locally", "INFO")
         
+        # Store the password for possible later use
+        self.password = user_info.get("password")
+        
         # Update last activity time
         self._update_activity_time()
         
-        # After local authentication, get token from API server
-        self.login_with_api(user_info.get("api_key"))
+        # After local authentication, get token from API server using the actual password
+        if self.password:
+            self.login_with_api(self.password)
+        else:
+            self.log_message("No password available for API authentication", "ERROR")
+            self.login_status_var.set("Authentication error: No password available")
+            self.login_manager.show_login_dialog(self.window, self.on_login_success)
 
-    def login_with_api(self, api_key=None):
+    def login_with_api(self, password):
         """Login to the API server with current credentials."""
         self.status_var.set("Logging in to API...")
         
-        # Store api_key in a container that can be accessed from the nested function
-        auth_data = {'api_key': api_key}
-        
         def perform_login():
             try:
-                # Use API key if provided, otherwise generate a new one
-                if not auth_data['api_key']:
-                    import secrets
-                    auth_data['api_key'] = f"sk_securevault_{secrets.token_hex(16)}"
+                # Log the authentication attempt
+                self.log_message(f"Attempting API authentication for user: {self.username}", "INFO")
                 
-                # Step 1: First get a CSRF token by making a GET request
-                self.log_message("Getting CSRF token from server...", "INFO")
-                
-                # Clear existing cookies to start fresh
-                self.session.cookies.clear()
-                
-                try:
-                    # Make a GET request to get CSRF cookie
-                    self.session.get(
-                        f"{self.api_url}/files", 
-                        timeout=5,
-                        verify=False
-                    )
-                    
-                    # Extract CSRF token from cookies
-                    csrf_token = None
-                    for cookie in self.session.cookies:
-                        if 'csrf' in cookie.name.lower():
-                            csrf_token = cookie.value
-                            self.log_message(f"Found CSRF token in cookie: {cookie.name}", "INFO")
-                            break
-                    
-                    if not csrf_token:
-                        self.log_message("No CSRF token found in cookies", "WARNING")
-                except Exception as e:
-                    self.log_message(f"Error getting CSRF token: {e}", "WARNING")
-                    csrf_token = None
-                
-                # Step 2: Make the auth request with the CSRF token
-                self.log_message("Attempting API authentication with CSRF token...", "INFO")
-                
-                headers = {
-                    'X-CSRFToken': csrf_token if csrf_token else '',
-                    'X-Requested-With': 'XMLHttpRequest',  # This helps identify AJAX requests
-                    'Referer': 'https://localhost:5000/',  # Required for CSRF validation
-                    'Origin': 'https://localhost:5000'  # Required for CSRF validation
-                }
-                
-                # Create form data with CSRF token
+                # Use only form data for authentication - keeping it simple
                 form_data = {
                     'username': self.username,
-                    'password': auth_data['api_key']
+                    'password': password  # Use the actual password
                 }
                 
-                # Add CSRF token to form data if available
-                if csrf_token:
-                    form_data['csrf_token'] = csrf_token
-                
-                # Make the auth request with proper CSRF handling
+                # Make a simple POST request without headers that might confuse the server
                 response = self.session.post(
                     f"{self.api_url}/auth",
                     data=form_data,
-                    headers=headers,
-                    verify=False,
-                    auth=(self.username, auth_data['api_key'])  # Include as both auth and form data
+                    verify=False
                 )
                 
                 # Handle the response
@@ -821,8 +780,6 @@ class SecureVaultGUI:
                     # Log detailed error information for debugging
                     self.log_message(f"API login failed: {response.status_code}", "ERROR")
                     self.log_message(f"Response text: {response.text}", "ERROR")
-                    self.log_message(f"CSRF token used: {csrf_token}", "INFO")
-                    self.log_message(f"Headers sent: {headers}", "INFO")
                     
                     # Extract error message if available
                     error_msg = f"API login failed: {response.status_code}"
@@ -842,7 +799,8 @@ class SecureVaultGUI:
                 self.window.after(0, lambda: self.login_manager.show_login_dialog(self.window, self.on_login_success))
         
         # Run in thread to avoid freezing UI
-        threading.Thread(target=perform_login).start()
+        threading.Thread(target=perform_login, daemon=True).start()
+
 
     def login(self):
         """Legacy login method - redirects to the secure login dialog"""
