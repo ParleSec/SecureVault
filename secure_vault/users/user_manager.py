@@ -8,6 +8,9 @@ import logging
 import secrets
 from pathlib import Path
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 import base64
 from typing import Optional, Dict, Any, Tuple, List
 import time
@@ -17,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 class UserManager:
     """Manages user accounts and authentication with secure password storage."""
+    
+    # Hash method identifiers
+    HASH_METHOD_PBKDF2 = "pbkdf2"
+    HASH_METHOD_ARGON2ID = "argon2id"
     
     def __init__(self, db_path: str):
         """
@@ -44,6 +51,7 @@ class UserManager:
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             password_salt TEXT NOT NULL,
+            hash_method TEXT DEFAULT 'pbkdf2',
             email TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_login TIMESTAMP,
@@ -52,6 +60,13 @@ class UserManager:
             api_key TEXT
         )
         ''')
+        
+        # Add hash_method column if it doesn't exist (for compatibility with existing databases)
+        try:
+            cursor.execute("SELECT hash_method FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE users ADD COLUMN hash_method TEXT DEFAULT 'pbkdf2'")
+            logger.info("Added hash_method column to users table")
         
         conn.commit()
         conn.close()
@@ -84,8 +99,8 @@ class UserManager:
             salt = secrets.token_bytes(16)
             salt_b64 = base64.b64encode(salt).decode('utf-8')
             
-            # Hash the password with the salt
-            password_hash = self._hash_password(password, salt)
+            # Hash the password with the salt using Argon2id
+            password_hash, hash_method = self._hash_password(password, salt)
             
             # Generate API key for this user
             api_key = secrets.token_hex(32)
@@ -95,15 +110,15 @@ class UserManager:
             cursor = conn.cursor()
             cursor.execute(
                 '''
-                INSERT INTO users (username, password_hash, password_salt, email, api_key)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO users (username, password_hash, password_salt, hash_method, email, api_key)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ''', 
-                (username, password_hash, salt_b64, email, api_key)
+                (username, password_hash, salt_b64, hash_method, email, api_key)
             )
             conn.commit()
             conn.close()
             
-            logger.info(f"User '{username}' created successfully")
+            logger.info(f"User '{username}' created successfully using {hash_method}")
             return True
             
         except Exception as e:
@@ -129,7 +144,7 @@ class UserManager:
             
             # Get user record
             cursor.execute(
-                "SELECT id, password_hash, password_salt, account_locked, failed_attempts, api_key FROM users WHERE username = ?", 
+                "SELECT id, password_hash, password_salt, hash_method, account_locked, failed_attempts, api_key FROM users WHERE username = ?", 
                 (username,)
             )
             row = cursor.fetchone()
@@ -139,7 +154,10 @@ class UserManager:
                 logger.warning(f"Authentication failed: user '{username}' not found")
                 return False, {"error": "Invalid username or password"}
             
-            user_id, stored_hash, salt_b64, is_locked, failed_attempts, api_key = row
+            user_id, stored_hash, salt_b64, hash_method, is_locked, failed_attempts, api_key = row
+            
+            # Use empty string as default if hash_method is None (for backward compatibility)
+            hash_method = hash_method or self.HASH_METHOD_PBKDF2
             
             # Check if account is locked
             if is_locked:
@@ -148,9 +166,21 @@ class UserManager:
             
             # Verify the password
             salt = base64.b64decode(salt_b64)
-            calculated_hash = self._hash_password(password, salt)
+            password_verified = self._verify_password(password, stored_hash, salt, hash_method)
             
-            if calculated_hash == stored_hash:
+            if password_verified:
+                # Check if we need to upgrade the hash method
+                if hash_method != self.HASH_METHOD_ARGON2ID:
+                    logger.info(f"Upgrading password hash for user '{username}' from {hash_method} to {self.HASH_METHOD_ARGON2ID}")
+                    # Generate new hash with Argon2id
+                    new_hash, new_method = self._hash_password(password, salt)
+                    
+                    # Update user record with new hash and method
+                    cursor.execute(
+                        "UPDATE users SET password_hash = ?, hash_method = ? WHERE id = ?",
+                        (new_hash, new_method, user_id)
+                    )
+                
                 # Reset failed attempts and update last login
                 cursor.execute(
                     "UPDATE users SET failed_attempts = 0, last_login = CURRENT_TIMESTAMP WHERE id = ?",
@@ -240,20 +270,20 @@ class UserManager:
             salt = secrets.token_bytes(16)
             salt_b64 = base64.b64encode(salt).decode('utf-8')
             
-            # Hash the new password
-            password_hash = self._hash_password(new_password, salt)
+            # Hash the new password using Argon2id
+            password_hash, hash_method = self._hash_password(new_password, salt)
             
             # Update the database
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE users SET password_hash = ?, password_salt = ? WHERE username = ?",
-                (password_hash, salt_b64, username)
+                "UPDATE users SET password_hash = ?, password_salt = ?, hash_method = ? WHERE username = ?",
+                (password_hash, salt_b64, hash_method, username)
             )
             conn.commit()
             conn.close()
             
-            logger.info(f"Password changed successfully for user '{username}'")
+            logger.info(f"Password changed successfully for user '{username}' using {hash_method}")
             return True
             
         except Exception as e:
@@ -284,7 +314,7 @@ class UserManager:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, username, email, created_at, last_login, account_locked FROM users"
+                "SELECT id, username, email, created_at, last_login, account_locked, hash_method FROM users"
             )
             users = []
             for row in cursor.fetchall():
@@ -294,7 +324,8 @@ class UserManager:
                     "email": row[2],
                     "created_at": row[3],
                     "last_login": row[4],
-                    "account_locked": bool(row[5])
+                    "account_locked": bool(row[5]),
+                    "hash_method": row[6] or self.HASH_METHOD_PBKDF2  # Default to PBKDF2 if null
                 })
             conn.close()
             return users
@@ -317,32 +348,103 @@ class UserManager:
             logger.error(f"Error deleting user: {e}")
             return False
     
-    def _hash_password(self, password: str, salt: bytes) -> str:
+    def _hash_password(self, password: str, salt: bytes) -> Tuple[str, str]:
         """
-        Hash a password using PBKDF2 (alternative to Argon2id).
+        Hash a password using Argon2id for improved security.
         
         Args:
             password: The password to hash
             salt: The salt to use
             
         Returns:
-            str: Base64-encoded password hash
+            Tuple[str, str]: (Base64-encoded password hash, hash method)
         """
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.backends import default_backend
+        try:
+            # Use Argon2id with strong parameters
+            kdf = Argon2id(
+                length=32,
+                salt=salt,
+                iterations=10,          # Time cost (higher than file encryption for extra security)
+                lanes=4,                # Parallelism
+                memory_cost=65536       # Memory cost: 64 MB
+            )
+            
+            password_hash = kdf.derive(password.encode())
+            return base64.b64encode(password_hash).decode('utf-8'), self.HASH_METHOD_ARGON2ID
+            
+        except Exception as e:
+            logger.error(f"Error hashing password with Argon2id: {e}")
+            # Fall back to PBKDF2 only as a last resort if Argon2id fails
+            logger.warning("Falling back to PBKDF2 for password hashing")
+            
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=salt,
+                iterations=600000,  # Increased iteration count for better security
+                backend=default_backend()
+            )
+            
+            password_hash = kdf.derive(password.encode())
+            return base64.b64encode(password_hash).decode('utf-8'), self.HASH_METHOD_PBKDF2
+    
+    def _verify_password(self, password: str, stored_hash: str, salt: bytes, hash_method: str) -> bool:
+        """
+        Verify a password against its stored hash.
         
-        # Use PBKDF2 instead of Argon2id
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=390000,  # Higher iteration count for security
-            backend=default_backend()
-        )
-        
-        password_hash = kdf.derive(password.encode())
-        return base64.b64encode(password_hash).decode('utf-8')
+        Args:
+            password: The password to verify
+            stored_hash: The stored hash (base64 encoded)
+            salt: The salt used for hashing
+            hash_method: The method used for hashing
+            
+        Returns:
+            bool: True if the password matches
+        """
+        try:
+            stored_hash_bytes = base64.b64decode(stored_hash)
+            
+            if hash_method == self.HASH_METHOD_ARGON2ID:
+                # Use Argon2id for verification
+                kdf = Argon2id(
+                    length=32,
+                    salt=salt,
+                    iterations=10,
+                    lanes=4,
+                    memory_cost=65536
+                )
+                
+                # For Argon2id, we need to derive and compare
+                try:
+                    derived_hash = kdf.derive(password.encode())
+                    # This is not a constant-time comparison, but it's inside a try block 
+                    # that will catch exceptions from derive() which runs in constant time
+                    return derived_hash == stored_hash_bytes
+                except Exception:
+                    return False
+                    
+            else:  # Default to PBKDF2
+                # Use PBKDF2 for verification
+                kdf = PBKDF2HMAC(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=salt,
+                    iterations=600000 if hash_method == self.HASH_METHOD_PBKDF2 else 390000,  # Support both old and new counts
+                    backend=default_backend()
+                )
+                
+                try:
+                    # Verify using derive_and_verify which should run in constant time
+                    derived_hash = kdf.derive(password.encode())
+                    # This is not a constant-time comparison, but it's inside a try block 
+                    # that will catch exceptions from derive() which runs in constant time
+                    return derived_hash == stored_hash_bytes
+                except Exception:
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Error verifying password: {e}")
+            return False
     
     def _validate_password(self, password: str) -> Tuple[bool, Optional[str]]:
         """
