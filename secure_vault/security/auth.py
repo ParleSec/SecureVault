@@ -27,36 +27,36 @@ class AuthenticationManager:
         self.app.config['JWT_SECRET_KEY'] = self.jwt_secret_key
         self.app.config['JWT_ALGORITHM'] = 'HS256'
         
-        # Token blacklist storage
-        self.token_blacklist_dir = Path('./token_blacklist')
-        self.token_blacklist_dir.mkdir(parents=True, exist_ok=True)
-        self.token_blacklist_file = self.token_blacklist_dir / 'blacklist.json'
-        self.token_blacklist = self._load_blacklist()
+        # Token blocklist storage
+        self.token_blocklist_dir = Path('./token_blocklist')
+        self.token_blocklist_dir.mkdir(parents=True, exist_ok=True)
+        self.token_blocklist_file = self.token_blocklist_dir / 'blocklist.json'
+        self.token_blocklist = self._load_blocklist()
         
-        logger.info(f"Authentication manager initialized with {len(self.token_blacklist)} blacklisted tokens")
+        logger.info(f"Authentication manager initialized with {len(self.token_blocklist)} blocklisted tokens")
     
-    def _load_blacklist(self):
-        """Load token blacklist from disk"""
-        if not self.token_blacklist_file.exists():
+    def _load_blocklist(self):
+        """Load token blocklist from disk"""
+        if not self.token_blocklist_file.exists():
             return {}
         
         try:
-            with open(self.token_blacklist_file, 'r') as f:
+            with open(self.token_blocklist_file, 'r') as f:
                 data = json.load(f)
-                # Filter out expired blacklist entries
+                # Filter out expired blocklist entries
                 now = time.time()
                 return {token: exp for token, exp in data.items() if exp > now}
         except Exception as e:
-            logger.error(f"Failed to load token blacklist: {e}")
+            logger.error(f"Failed to load token blocklist: {e}")
             return {}
     
-    def _save_blacklist(self):
-        """Save token blacklist to disk"""
+    def _save_blocklist(self):
+        """Save token blocklist to disk"""
         try:
-            with open(self.token_blacklist_file, 'w') as f:
-                json.dump(self.token_blacklist, f)
+            with open(self.token_blocklist_file, 'w') as f:
+                json.dump(self.token_blocklist, f)
         except Exception as e:
-            logger.error(f"Failed to save token blacklist: {e}")
+            logger.error(f"Failed to save token blocklist: {e}")
     
     def setup_auth_routes(self):
         """Set up authentication routes on the Flask app"""
@@ -219,9 +219,9 @@ def setup_auth_routes(self):
             logger.debug(f"Validating token: {token[:10]}...")
         
         try:
-            # Check if token is blacklisted
-            if token in self.token_blacklist:
-                logger.warning("Token is blacklisted")
+            # Check if token is blocklisted
+            if token in self.token_blocklist:
+                logger.warning("Token is blocklisted")
                 return False, "Token has been revoked"
             
             # Verify and decode the token
@@ -246,7 +246,7 @@ def setup_auth_routes(self):
             return False, f"Token validation error: {str(e)}"
     
     def revoke_token(self, token):
-        """Revoke a token by adding it to the blacklist"""
+        """Revoke a token by adding it to the blocklist"""
         try:
             # Decode without verification to get expiration
             payload = jwt.decode(
@@ -259,11 +259,11 @@ def setup_auth_routes(self):
             # Get expiration timestamp
             exp = payload.get('exp', time.time() + 86400)  # Default 24h if not found
             
-            # Add to blacklist with expiration
-            self.token_blacklist[token] = exp
+            # Add to blocklist with expiration
+            self.token_blocklist[token] = exp
             
-            # Save blacklist
-            self._save_blacklist()
+            # Save blocklist
+            self._save_blocklist()
             
             logger.info(f"Token revoked for user: {payload.get('sub', 'unknown')}")
             return True
@@ -298,20 +298,20 @@ def setup_auth_routes(self):
             return f(*args, **kwargs)
         return decorated
     
-    def cleanup_blacklist(self):
-        """Clean up expired tokens from the blacklist"""
+    def cleanup_blocklist(self):
+        """Clean up expired tokens from the blocklist"""
         try:
             now = time.time()
-            expired_tokens = [token for token, exp in self.token_blacklist.items() if exp <= now]
+            expired_tokens = [token for token, exp in self.token_blocklist.items() if exp <= now]
             
             for token in expired_tokens:
-                del self.token_blacklist[token]
+                del self.token_blocklist[token]
             
             if expired_tokens:
-                self._save_blacklist()
-                logger.info(f"Cleaned up {len(expired_tokens)} expired tokens from blacklist")
+                self._save_blocklist()
+                logger.info(f"Cleaned up {len(expired_tokens)} expired tokens from blocklist")
         except Exception as e:
-            logger.error(f"Failed to clean up token blacklist: {e}")
+            logger.error(f"Failed to clean up token blocklist: {e}")
 
 # Create a more secure API authentication setup
 def setup_authentication(app, user_db_path):
@@ -338,11 +338,11 @@ def setup_authentication(app, user_db_path):
     auth_manager = AuthenticationManager(app, user_db_path)
     auth_manager.setup_auth_routes()
     
-    # Clean up expired blacklisted tokens periodically
+    # Clean up expired blocklisted tokens periodically
     @app.before_request
     def cleanup_expired_tokens():
         # Clean up every ~100 requests (randomly)
         if secrets.randbelow(100) == 0:
-            auth_manager.cleanup_blacklist()
+            auth_manager.cleanup_blocklist()
     
     return auth_manager

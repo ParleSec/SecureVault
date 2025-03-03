@@ -14,7 +14,7 @@ import time
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
-from jose import jwt
+from jose import jwt, JWTError
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
@@ -24,6 +24,10 @@ from werkzeug.utils import secure_filename
 import base64
 import json
 import traceback
+import random
+
+# Import persistent token blocklist
+from secure_vault.web.token_blocklist import TokenBlocklist, is_token_revoked
 
 # Import user management for authentication
 from secure_vault.users.user_manager import UserManager
@@ -70,6 +74,10 @@ class SecureAPI:
             
         # Initialize user manager
         self.user_manager = UserManager(self.user_db_path)
+
+        # Initialize token blocklist with the user database path
+        self.token_blocklist = TokenBlocklist(self.user_db_path)
+        logger.info("Initialized persistent token blocklist")
         
         # Apply proxy fix (useful if behind a reverse proxy)
         self.app.wsgi_app = ProxyFix(self.app.wsgi_app, x_proto=1, x_host=1)
@@ -117,8 +125,8 @@ class SecureAPI:
         else:
             logger.info(f"Using existing SECRET_KEY: {self.app.config['SECRET_KEY'][:10]}...")
         
-        # Blacklist for revoked tokens
-        self.token_blacklist = set()
+        # Blocklist for revoked tokens
+        self.token_blocklist = set()
         
         # Ensure upload directory exists
         upload_folder = self.app.config['UPLOAD_FOLDER']
@@ -131,6 +139,9 @@ class SecureAPI:
 
     def _initialize_routes(self):
         """Initialize API routes with security decorators."""
+        # Store self reference for use in decorators
+        api_instance = self
+        
         def require_auth(f):
             """Decorator to require valid JWT authentication."""
             @wraps(f)
@@ -150,28 +161,26 @@ class SecureAPI:
                     return jsonify({'error': 'Missing authentication token'}), 401
                     
                 try:
-                    if token in self.token_blacklist:
-                        logger.warning(f"Token is blacklisted: {token[:10]}...")
-                        raise jwt.InvalidTokenError("Token has been revoked")
+                    # Use the global function instead of instance method
+                    if is_token_revoked(token):
+                        logger.warning(f"Token is blocklisted: {token[:10]}...")
+                        raise JWTError("Token has been revoked")
                     
-                    logger.debug(f"Decoding token with secret key length: {len(self.app.config['SECRET_KEY'])}")
-                    # Use explicit algorithm
+                    # Decode token
                     payload = jwt.decode(
                         token,
                         self.app.config['SECRET_KEY'],
                         algorithms=['HS256']
                     )
                     
-                    logger.debug(f"Token decoded successfully: {payload}")
                     # Store user info in Flask g object
                     g.user_id = payload['sub']
                     g.username = payload.get('username', 'unknown')
-                    logger.debug(f"User authenticated: {g.username} (ID: {g.user_id})")
                     
                 except jwt.ExpiredSignatureError as e:
                     logger.warning(f"Token expired: {e}")
                     return jsonify({'error': 'Token has expired'}), 401
-                except jwt.InvalidTokenError as e:
+                except JWTError as e:
                     logger.warning(f"Invalid token: {e}")
                     return jsonify({'error': f'Invalid token: {str(e)}'}), 401
                 except Exception as e:
@@ -420,12 +429,42 @@ class SecureAPI:
             """Revoke the current authentication token."""
             token = request.headers.get('Authorization', '').replace('Bearer ', '')
             try:
-                jwt.decode(token, self.app.config['SECRET_KEY'], algorithms=['HS256'])
-                self.token_blacklist.add(token)
-                return jsonify({'message': 'Token revoked successfully'})
-            except jwt.InvalidTokenError:
+                # Decode the token to get its payload
+                payload = jwt.decode(token, self.app.config['SECRET_KEY'], algorithms=['HS256'])
+                
+                # Add token to persistent blocklist - this updates both the DB and the in-memory set
+                if self.token_blocklist.add_token(token, payload):
+                    logger.info(f"Token revoked successfully for user {g.username}")
+                    return jsonify({'message': 'Token revoked successfully'})
+                else:
+                    logger.error(f"Failed to revoke token for user {g.username}")
+                    return jsonify({'error': 'Failed to revoke token'}), 500
+            except JWTError as e:
+                logger.error(f"Invalid token in revocation request: {e}")
                 return jsonify({'error': 'Invalid token'}), 401
         self.csrf.exempt(revoke_token)
+            
+        @self.app.route('/api/maintenance/cleanup-tokens', methods=['POST'])
+        def cleanup_tokens():
+            """Cleanup expired tokens from the blocklist (admin only)."""
+            # Only allow access from localhost
+            if request.remote_addr not in ['127.0.0.1', 'localhost']:
+                return jsonify({'error': 'Access denied'}), 403
+                
+            # Verify admin key
+            admin_key = request.headers.get('X-Admin-Key')
+            expected_admin_key = os.getenv('SECUREVAULT_ADMIN_KEY')
+            
+            if admin_key != expected_admin_key:
+                return jsonify({'error': 'Invalid admin key'}), 403
+                
+            # Perform cleanup
+            removed_count = self.token_blocklist.cleanup_expired_tokens()
+            return jsonify({
+                'message': 'Token cleanup completed',
+                'tokens_removed': removed_count
+            })
+        self.csrf.exempt(cleanup_tokens)
         
         @self.app.route('/api/users/register', methods=['POST'])
         @self.limiter.limit("5 per hour")
@@ -445,7 +484,7 @@ class SecureAPI:
             admin_key = data.get('admin_key')
             
             # Verify admin key if creating first user or if other users exist
-            expected_admin_key = os.getenv('SECUREVAULT_ADMIN_KEY', 'change_this_admin_key')
+            expected_admin_key = os.getenv('SECUREVAULT_ADMIN_KEY')
             if self.user_manager.has_any_users() and admin_key != expected_admin_key:
                 return jsonify({'error': 'Invalid admin key'}), 403
             
@@ -472,6 +511,8 @@ class SecureAPI:
         @self.app.route('/api/debug/jwt', methods=['GET'])
         def debug_jwt():
             """Debug endpoint for JWT token validation."""
+            api_instance = self  # Store reference to self
+            
             # Only allow access from localhost
             if request.remote_addr not in ['127.0.0.1', 'localhost']:
                 return jsonify({'error': 'Access denied'}), 403
@@ -516,21 +557,25 @@ class SecureAPI:
                 try:
                     decoded = jwt.decode(
                         token,
-                        self.app.config['SECRET_KEY'],
+                        api_instance.app.config['SECRET_KEY'],
                         algorithms=['HS256']
                     )
                     verification_result = {'verified': True, 'decoded': decoded}
                 except Exception as e:
                     verification_result = {'verified': False, 'error': str(e)}
                 
+                # Check if token is revoked
+                is_revoked = api_instance.token_blocklist.is_revoked(token)
+                
                 return jsonify({
                     'token': token,
                     'header': header,
                     'payload': payload,
                     'verification': verification_result,
+                    'is_revoked': is_revoked,
                     'app_config': {
-                        'secret_key_length': len(self.app.config['SECRET_KEY']),
-                        'jwt_expiration_hours': self.app.config['JWT_EXPIRATION_HOURS']
+                        'secret_key_length': len(api_instance.app.config['SECRET_KEY']),
+                        'jwt_expiration_hours': api_instance.app.config['JWT_EXPIRATION_HOURS']
                     }
                 })
             except Exception as e:
@@ -563,6 +608,21 @@ class SecureAPI:
                         os.remove(temp_path)
                 except Exception as e:
                     logger.error(f"Failed to remove temp file: {e}")
+        
+        @self.app.before_request
+        def cleanup_expired_tokens_periodically():
+            """Periodically clean up expired tokens."""
+            api_instance = self  # Store reference to self
+            
+            # Run cleanup approximately every 100 requests (to avoid doing it on every request)
+            if random.randint(1, 100) == 1:
+                try:
+                    removed = api_instance.token_blocklist.cleanup_expired_tokens()
+                    if removed > 0:
+                        logger.info(f"Periodic cleanup: removed {removed} expired tokens")
+                except Exception as e:
+                    logger.error(f"Failed to clean up expired tokens: {e}")
+
 
     def run(self, host='localhost', port=5000, ssl_context=None, **kwargs):
         """
@@ -591,6 +651,7 @@ class SecureAPI:
             cert_path, key_path = ensure_valid_cert_exists()
             self.app.run(host=host, port=port, ssl_context=(cert_path, key_path), **kwargs)
 
+
     def cleanup(self):
         """Cleanup temporary files and resources."""
         try:
@@ -601,7 +662,7 @@ class SecureAPI:
                         os.remove(file)
                     except Exception as e:
                         logger.error(f"Failed to delete temporary file {file}: {e}")
-            self.token_blacklist.clear()
+            # No need to clear token blocklist since it's persistent in the database
         except Exception as e:
             logger.error(f"Cleanup failed: {e}")
 
