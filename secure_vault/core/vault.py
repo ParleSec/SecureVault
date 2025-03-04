@@ -251,35 +251,84 @@ class CryptoManager:
         )
         return kdf.derive(password.encode())
 
-    def encrypt(self, data: bytes, password: str) -> EncryptedData:
-        """Encrypt data using AES-256-GCM with authenticated encryption"""
-        try:
-            nonce = os.urandom(12)
-            key = self.derive_key(password)
-            aesgcm = AESGCM(key)
-            
-            ciphertext = aesgcm.encrypt(nonce, data, None)
-            signature = self._signing_key.sign(ciphertext)
+    def encrypt_file(self, file_path: str, password: str) -> Path:
+        """
+        Encrypt a file and store it in the vault with enhanced validation.
 
-            # Get public key for verification
-            public_key_bytes = self._signing_key.public_key().public_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PublicFormat.Raw
-            )
+        The encrypted file will retain its original file name (with extension)
+        and have '.vault' appended. For example, 'document.pdf' becomes
+        'document.pdf.vault'.
+
+        Args:
+            file_path (str): Path to the file to encrypt.
+            password (str): Password used for encryption.
+
+        Returns:
+            Path: Path to the encrypted file.
+
+        Raises:
+            FileNotFoundError: If the input file does not exist.
+            ValueError: If the input path or password fails validation.
+            Exception: For any encryption error.
+        """
+        try:
+            # Import security validator for enhanced validation
+            from secure_vault.utils.input_validation import security_validator
             
-            encrypted_data = EncryptedData(
-                nonce=base64.b64encode(nonce).decode('utf-8'),
-                salt=base64.b64encode(self.salt).decode('utf-8'),
-                ciphertext=base64.b64encode(ciphertext).decode('utf-8'),
-                signature=base64.b64encode(signature).decode('utf-8'),
-                public_key=base64.b64encode(public_key_bytes).decode('utf-8')
+            # Validate file path
+            valid, error = security_validator.validate_input(
+                str(file_path),
+                check_sql=False,
+                check_xss=False,
+                check_path=True,
+                check_command=False,
+                context="path"
             )
+            if not valid:
+                raise ValueError(f"Invalid file path: {error}")
             
-            self.logger.info("data_encrypted", bytes_encrypted=len(data))
-            return encrypted_data
+            # Validate password for security concerns
+            valid, error = security_validator.validate_input(
+                password,
+                check_sql=True,
+                check_xss=True,
+                check_path=False,
+                check_command=False,
+                context="password"
+            )
+            if not valid:
+                raise ValueError(f"Invalid password: {error}")
+            
+            file_path = Path(file_path)
+            if not file_path.exists():
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            # Read file content.
+            with open(file_path, 'rb') as f:
+                data = f.read()
+            
+            # Encrypt data using the CryptoManager.
+            encrypted_data = self.crypto.encrypt(data, password)
+            
+            # Retain the original file name and append '.vault'.
+            encrypted_filename = f"{file_path.name}.vault"
+            encrypted_path = self.vault_dir / encrypted_filename
+            
+            # Write the encrypted data as JSON.
+            with open(encrypted_path, 'w') as f:
+                f.write(encrypted_data.model_dump_json())
+            
+            self.logger.info("file_encrypted", 
+                            source=str(file_path),
+                            destination=str(encrypted_path),
+                            size=len(data))
+            
+            return encrypted_path
             
         except Exception as e:
-            self.logger.error("encryption_failed", error=str(e))
+            self.logger.error("file_encryption_failed",
+                            file=str(file_path),
+                            error=str(e))
             raise
 
     def decrypt(self, encrypted_data: EncryptedData, password: str) -> bytes:
@@ -451,11 +500,7 @@ class SecureVault:
 
     def decrypt_file(self, encrypted_path: str, output_path: str, password: str) -> Path:
         """
-        Decrypt a file from the vault.
-
-        The decrypted file will be written to the specified output path.
-        It is assumed that the encrypted file's name ends with '.vault';
-        the caller is responsible for restoring the original name if desired.
+        Decrypt a file from the vault with enhanced validation.
 
         Args:
             encrypted_path (str): Path to the encrypted file.
@@ -466,9 +511,49 @@ class SecureVault:
             Path: Path to the decrypted file.
 
         Raises:
+            ValueError: If the encrypted path, output path, or password fails validation.
             Exception: If decryption fails.
         """
         try:
+            # Import security validator for enhanced validation
+            from secure_vault.utils.input_validation import security_validator
+            
+            # Validate encrypted path
+            valid, error = security_validator.validate_input(
+                str(encrypted_path),
+                check_sql=False,
+                check_xss=False,
+                check_path=True,
+                check_command=False,
+                context="path"
+            )
+            if not valid:
+                raise ValueError(f"Invalid encrypted file path: {error}")
+            
+            # Validate output path
+            valid, error = security_validator.validate_input(
+                str(output_path),
+                check_sql=False,
+                check_xss=False,
+                check_path=True,
+                check_command=False,
+                context="path"
+            )
+            if not valid:
+                raise ValueError(f"Invalid output path: {error}")
+            
+            # Validate password for security concerns
+            valid, error = security_validator.validate_input(
+                password,
+                check_sql=True,
+                check_xss=True,
+                check_path=False,
+                check_command=False,
+                context="password"
+            )
+            if not valid:
+                raise ValueError(f"Invalid password: {error}")
+            
             encrypted_path = Path(encrypted_path)
             output_path = Path(output_path)
             
@@ -487,16 +572,16 @@ class SecureVault:
                 f.write(decrypted_data)
             
             self.logger.info("file_decrypted",
-                             source=str(encrypted_path),
-                             destination=str(output_path),
-                             size=len(decrypted_data))
+                            source=str(encrypted_path),
+                            destination=str(output_path),
+                            size=len(decrypted_data))
             
             return output_path
             
         except Exception as e:
             self.logger.error("file_decryption_failed",
-                              file=str(encrypted_path),
-                              error=str(e))
+                            file=str(encrypted_path),
+                            error=str(e))
             raise
 
     def list_files(self) -> List[Path]:

@@ -4,7 +4,7 @@ Provides endpoints for authentication, file listing, encryption,
 decryption, and deletion.
 """
 
-from flask import Flask, request, jsonify, send_file, Response, g, abort, redirect
+from flask import Flask, request, jsonify, send_file, Response, g, abort, redirect, current_app
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 import tempfile
@@ -26,6 +26,7 @@ import base64
 import json
 import traceback
 import random
+import urllib.parse
 
 # Import persistent token blocklist
 from secure_vault.web.token_blocklist import is_token_revoked as global_is_token_revoked
@@ -55,6 +56,47 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+def validate_url_path():
+    """
+    Validate URL path for security concerns before processing the request.
+    This catches URL path issues that might bypass endpoint-specific validation.
+    """
+    # Skip for certain paths that are known to be safe
+    if request.path == '/' or request.path.startswith('/static/'):
+        return None
+    
+    # Skip authorization and options requests
+    if request.method == 'OPTIONS':
+        return None
+    
+    # Get API instance from current app
+    api_instance = getattr(current_app, '_secure_api_instance', None)
+    if not api_instance:
+        return None  # Can't validate without API instance
+    
+    # Validate each path segment
+    path_segments = request.path.split('/')
+    for segment in path_segments:
+        if not segment:  # Skip empty segments
+            continue
+            
+        # URL-decode segment to catch encoded attacks
+        decoded_segment = urllib.parse.unquote(segment)
+        
+        # Try validating segments that look like filenames
+        if '.' in segment or len(segment) > 3:
+            try:
+                valid, error = api_instance.validate_api_input(decoded_segment, 'path')
+                if not valid:
+                    logger.warning(f"URL path validation failed: {error} in '{decoded_segment}'")
+                    return jsonify({'error': f'Invalid URL path: {error}'}), 400
+            except Exception as e:
+                logger.error(f"Error validating URL path: {e}")
+                # Continue even if validation fails
+                
+    # Return None to continue with the request
+    return None
 
 class SecureAPI:
     """
@@ -87,6 +129,10 @@ class SecureAPI:
             
         # Initialize user manager
         self.user_manager = UserManager(self.user_db_path)
+
+        # Path Validation
+        self.app._secure_api_instance = self
+        self.app.before_request(validate_url_path)
 
         # Initialize token blocklist with the user database path
         self.token_blocklist = TokenBlocklist(self.user_db_path)
@@ -183,6 +229,107 @@ class SecureAPI:
             if not hasattr(self, 'token_blocklist'):
                 self.token_blocklist = set()
 
+    def validate_api_input(self, value, input_type, **kwargs):
+        """
+        Validate API input with appropriate context
+        
+        Args:
+            value: The input value to validate
+            input_type: Type of input ('filename', 'password', 'token', etc.)
+            **kwargs: Additional validation parameters
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # Import security validator for context-aware validation
+        try:
+            from secure_vault.utils.input_validation import security_validator
+            
+            # Skip validation for None values (will be handled separately)
+            if value is None:
+                return True, None
+            
+            # For backward compatibility: if security_validator doesn't have validate_input method,
+            # use the old method based on input type
+            if not hasattr(security_validator, 'validate_input'):
+                self.logger.warning("Enhanced validation not available - using legacy validation")
+                if input_type == 'username':
+                    # No validation for username in old version
+                    return True, None
+                elif input_type == 'password':
+                    # No validation for password in old version
+                    return True, None
+                elif input_type in ('filename', 'path'):
+                    return security_validator.check_path_traversal(value)
+                elif input_type == 'sql':
+                    return security_validator.check_sql_injection(value)
+                elif input_type in ('html', 'content'):
+                    return security_validator.check_xss(value)
+                elif input_type == 'command':
+                    return security_validator.check_command_injection(value)
+                else:
+                    # Default to all checks
+                    sql_valid, sql_error = security_validator.check_sql_injection(value)
+                    if not sql_valid:
+                        return sql_valid, sql_error
+                    
+                    xss_valid, xss_error = security_validator.check_xss(value)
+                    if not xss_valid:
+                        return xss_valid, xss_error
+                    
+                    return True, None
+            
+            # Map input types to validation contexts
+            context_map = {
+                'username': 'text',
+                'password': 'text',
+                'filename': 'filename',
+                'path': 'path',
+                'query': 'sql',
+                'content': 'html',
+                'command': 'command',
+                'token': 'text',
+                'email': 'text'
+            }
+            
+            # Get appropriate context
+            context = context_map.get(input_type, None)
+            
+            # Configure checks based on input type
+            check_sql = input_type in ('username', 'query', 'content', 'email', 'text')
+            check_xss = input_type in ('username', 'content', 'text', 'email')
+            check_path = input_type in ('filename', 'path')
+            check_command = input_type in ('command')
+            
+            # Override using kwargs if provided
+            if 'check_sql' in kwargs:
+                check_sql = kwargs['check_sql']
+            if 'check_xss' in kwargs:
+                check_xss = kwargs['check_xss']
+            if 'check_path' in kwargs:
+                check_path = kwargs['check_path']
+            if 'check_command' in kwargs:
+                check_command = kwargs['check_command']
+            
+            # Validate with security validator
+            return security_validator.validate_input(
+                value,
+                check_sql=check_sql,
+                check_xss=check_xss,
+                check_path=check_path,
+                check_command=check_command,
+                context=context
+            )
+            
+        except ImportError:
+            self.logger.warning("Security validator module not found - skipping validation")
+            return True, None
+        except Exception as e:
+            self.logger.error(f"Validation error: {e}")
+            # Fall back to accepting the input to avoid blocking functionality
+            return True, None
+
+
     def _initialize_routes(self):
         """Initialize API routes with security decorators."""
         # Store self reference for use in decorators
@@ -261,7 +408,7 @@ class SecureAPI:
         @self.app.route('/api/auth', methods=['POST'])
         @self.limiter.limit("25 per minute")
         def authenticate():
-            """Secure authentication endpoint with user verification."""
+            """Secure authentication endpoint with enhanced validation."""
             # Get credentials from either Basic Auth or form data
             username = None
             password = None
@@ -280,6 +427,26 @@ class SecureAPI:
                 username = json_data.get('username')
                 password = json_data.get('password')
             
+            # Log attempt with available info
+            logger.info(f"Authentication attempt received with method: {request.method}")
+
+            # Validate inputs before checking if they're missing
+            # This ensures we catch security violations even in partial credentials
+            if username:
+                # Enhanced validation for username
+                valid, error = self.validate_api_input(username, 'username')
+                if not valid:
+                    logger.warning(f"Authentication failed: invalid username format - {error}")
+                    return jsonify({'error': f'Invalid username format: {error}'}), 400
+            
+            if password:
+                # Validate password
+                valid, error = self.validate_api_input(password, 'password')
+                if not valid:
+                    logger.warning(f"Authentication failed: invalid password format - {error}")
+                    return jsonify({'error': f'Invalid password format: {error}'}), 400
+            
+            # Now check if credentials are complete
             if not username or not password:
                 logger.warning("Authentication attempt with missing credentials")
                 return jsonify({'error': 'Missing credentials'}), 401
@@ -397,15 +564,34 @@ class SecureAPI:
             """Securely encrypt and store an uploaded file using its original filename."""
             if 'file' not in request.files:
                 return jsonify({'error': 'No file provided'}), 400
+            
             file = request.files['file']
             password = request.form.get('password')
+            
+            # Check if password exists
             if not password:
                 return jsonify({'error': 'No password provided'}), 400
-
-            # Sanitize and retrieve the original filename.
-            original_filename = secure_filename(file.filename)
+            
+            # Validate password for security violations
+            valid, error = self.validate_api_input(password, 'password')
+            if not valid:
+                logger.warning(f"Encryption failed: invalid password format - {error}")
+                return jsonify({'error': f'Invalid password format: {error}'}), 400
+            
+            # Get and validate filename
+            original_filename = None
+            if file.filename:
+                # Sanitize and retrieve the original filename
+                original_filename = secure_filename(file.filename)
+            
             if not original_filename:
-                return jsonify({'error': 'Invalid filename'}), 400
+                return jsonify({'error': 'Invalid or missing filename'}), 400
+            
+            # Enhanced validation for filename
+            valid, error = self.validate_api_input(original_filename, 'filename')
+            if not valid:
+                logger.warning(f"Encryption failed: invalid filename - {error}")
+                return jsonify({'error': f'Invalid filename: {error}'}), 400
 
             # Save the uploaded file to a temporary location with its original name.
             temp_path = os.path.join(self.app.config['UPLOAD_FOLDER'], original_filename)
@@ -433,10 +619,24 @@ class SecureAPI:
         @self.limiter.limit("20 per hour")
         def decrypt_file(filename):
             """Securely decrypt and download a file."""
+            # First validate filename for security violations
+            valid, error = self.validate_api_input(filename, 'filename')
+            if not valid:
+                logger.warning(f"Decryption failed: invalid filename - {error}")
+                return jsonify({'error': f'Invalid filename: {error}'}), 400
+            
+            # Get and validate password
             password = request.form.get('password')
             if not password:
                 return jsonify({'error': 'No password provided'}), 400
             
+            # Validate password for security concerns
+            valid, error = self.validate_api_input(password, 'password')
+            if not valid:
+                logger.warning(f"Decryption failed: invalid password format - {error}")
+                return jsonify({'error': f'Invalid password format: {error}'}), 400
+            
+            # Now check if the file exists (only after validation passes)
             encrypted_path = self.vault.vault_dir / filename
             if not encrypted_path.exists():
                 return jsonify({'error': 'File not found'}), 404
@@ -481,10 +681,19 @@ class SecureAPI:
         @self.limiter.limit("20 per hour")
         def delete_file(filename):
             """Securely delete an encrypted file."""
+            # First validate filename for security violations
+            valid, error = self.validate_api_input(filename, 'filename')
+            if not valid:
+                logger.warning(f"Deletion failed: invalid filename - {error}")
+                return jsonify({'error': f'Invalid filename: {error}'}), 400
+            
+            # Only check if file exists after validation passes
+            file_path = self.vault.vault_dir / filename
+            if not file_path.exists():
+                return jsonify({'error': 'File not found'}), 404
+            
+            # Attempt deletion
             try:
-                file_path = self.vault.vault_dir / filename
-                if not file_path.exists():
-                    return jsonify({'error': 'File not found'}), 404
                 os.remove(file_path)
                 return jsonify({'message': 'File deleted successfully'})
             except Exception as e:
@@ -792,6 +1001,97 @@ class SecureAPI:
                         logger.info(f"Periodic cleanup: removed {removed} expired tokens")
                 except Exception as e:
                     logger.error(f"Failed to clean up expired tokens: {e}")
+
+
+        def validate_api_input(self, value, input_type, **kwargs):
+            """
+            Validate API input with appropriate context
+            
+            Args:
+                value: The input value to validate
+                input_type: Type of input ('filename', 'password', 'token', etc.)
+                **kwargs: Additional validation parameters
+            
+            Returns:
+                Tuple of (is_valid, error_message)
+            """
+            # Import security validator here to avoid circular imports
+            from secure_vault.utils.input_validation import security_validator
+            
+            # Skip validation for None values (will be handled separately)
+            if value is None:
+                return True, None
+            
+            # Map input types to validation contexts
+            context_map = {
+                'username': 'text',
+                'password': 'text',
+                'filename': 'filename',
+                'path': 'path',
+                'query': 'sql',
+                'content': 'html',
+                'command': 'command',
+                'token': 'text',
+                'email': 'text'
+            }
+            
+            # Get appropriate context
+            context = context_map.get(input_type, None)
+            
+            # Configure checks based on input type
+            check_sql = input_type in ('username', 'query', 'content', 'email', 'text')
+            check_xss = input_type in ('username', 'content', 'text', 'email')
+            check_path = input_type in ('filename', 'path')
+            check_command = input_type in ('command')
+            
+            # Override using kwargs if provided
+            if 'check_sql' in kwargs:
+                check_sql = kwargs['check_sql']
+            if 'check_xss' in kwargs:
+                check_xss = kwargs['check_xss']
+            if 'check_path' in kwargs:
+                check_path = kwargs['check_path']
+            if 'check_command' in kwargs:
+                check_command = kwargs['check_command']
+            
+            # Validate with security validator
+            return security_validator.validate_input(
+                value,
+                check_sql=check_sql,
+                check_xss=check_xss,
+                check_path=check_path,
+                check_command=check_command,
+                context=context
+            )
+        
+        def validate_url_path(self):
+            """
+            Validate URL path for security concerns before processing the request.
+            This catches URL path issues that might bypass endpoint-specific validation.
+            """
+            # Skip for certain paths that are known to be safe
+            if request.path == '/' or request.path.startswith('/static/'):
+                return
+            
+            # Skip authorization and options requests
+            if request.method == 'OPTIONS':
+                return
+            
+            # Validate each path segment
+            path_segments = request.path.split('/')
+            for segment in path_segments:
+                if not segment:  # Skip empty segments
+                    continue
+                    
+                # URL-decode segment to catch encoded attacks
+                decoded_segment = urllib.parse.unquote(segment)
+                
+                # Try validating segments that look like filenames
+                if '.' in segment or len(segment) > 3:
+                    valid, error = self.validate_api_input(decoded_segment, 'path')
+                    if not valid:
+                        logger.warning(f"URL path validation failed: {error} in '{decoded_segment}'")
+                        return jsonify({'error': f'Invalid URL path: {error}'}), 400
 
 
     def run(self, host='localhost', port=5000, ssl_context=None, **kwargs):

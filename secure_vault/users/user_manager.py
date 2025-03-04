@@ -73,7 +73,7 @@ class UserManager:
         
     def create_user(self, username: str, password: str, email: Optional[str] = None) -> bool:
         """
-        Create a new user account.
+        Create a new user account with enhanced validation.
         
         Args:
             username: The username for the new account
@@ -89,6 +89,36 @@ class UserManager:
                 logger.warning(f"User creation failed: username '{username}' already exists")
                 return False
             
+            # Import security validator for enhanced validation
+            from secure_vault.utils.input_validation import security_validator
+            
+            # Enhanced validation for username
+            valid, error = security_validator.validate_input(
+                username,
+                check_sql=True,
+                check_xss=True,
+                check_path=False,
+                check_command=False,
+                context="text"
+            )
+            if not valid:
+                logger.warning(f"User creation failed: invalid username format - {error}")
+                return False
+            
+            # Enhanced validation for email if provided
+            if email:
+                valid, error = security_validator.validate_input(
+                    email,
+                    check_sql=True,
+                    check_xss=True,
+                    check_path=False,
+                    check_command=False,
+                    context="text"
+                )
+                if not valid:
+                    logger.warning(f"User creation failed: invalid email format - {error}")
+                    return False
+            
             # Validate password
             valid, error_msg = self._validate_password(password)
             if not valid:
@@ -99,8 +129,8 @@ class UserManager:
             salt = secrets.token_bytes(16)
             salt_b64 = base64.b64encode(salt).decode('utf-8')
             
-            # Hash the password with the salt using Argon2id
-            password_hash, hash_method = self._hash_password(password, salt)
+            # Hash the password with the salt
+            password_hash = self._hash_password(password, salt)
             
             # Generate API key for this user
             api_key = secrets.token_hex(32)
@@ -110,15 +140,15 @@ class UserManager:
             cursor = conn.cursor()
             cursor.execute(
                 '''
-                INSERT INTO users (username, password_hash, password_salt, hash_method, email, api_key)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (username, password_hash, password_salt, email, api_key)
+                VALUES (?, ?, ?, ?, ?)
                 ''', 
-                (username, password_hash, salt_b64, hash_method, email, api_key)
+                (username, password_hash, salt_b64, email, api_key)
             )
             conn.commit()
             conn.close()
             
-            logger.info(f"User '{username}' created successfully using {hash_method}")
+            logger.info(f"User '{username}' created successfully")
             return True
             
         except Exception as e:
@@ -243,7 +273,7 @@ class UserManager:
     
     def change_password(self, username: str, current_password: str, new_password: str) -> bool:
         """
-        Change a user's password.
+        Change a user's password with enhanced validation.
         
         Args:
             username: The username of the account
@@ -260,9 +290,23 @@ class UserManager:
             return False
         
         # Validate new password
-        valid, _ = self._validate_password(new_password)
+        valid, error_msg = self._validate_password(new_password)
         if not valid:
-            logger.warning(f"Password change failed: new password does not meet requirements")
+            logger.warning(f"Password change failed: new password does not meet requirements - {error_msg}")
+            return False
+        
+        # Additional security check on new password
+        from secure_vault.utils.input_validation import security_validator
+        valid, error = security_validator.validate_input(
+            new_password,
+            check_sql=True,
+            check_xss=True, 
+            check_path=False,
+            check_command=False,
+            context="password"
+        )
+        if not valid:
+            logger.warning(f"Password change failed: security check failed - {error}")
             return False
         
         try:
@@ -270,20 +314,20 @@ class UserManager:
             salt = secrets.token_bytes(16)
             salt_b64 = base64.b64encode(salt).decode('utf-8')
             
-            # Hash the new password using Argon2id
-            password_hash, hash_method = self._hash_password(new_password, salt)
+            # Hash the new password
+            password_hash = self._hash_password(new_password, salt)
             
             # Update the database
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE users SET password_hash = ?, password_salt = ?, hash_method = ? WHERE username = ?",
-                (password_hash, salt_b64, hash_method, username)
+                "UPDATE users SET password_hash = ?, password_salt = ? WHERE username = ?",
+                (password_hash, salt_b64, username)
             )
             conn.commit()
             conn.close()
             
-            logger.info(f"Password changed successfully for user '{username}' using {hash_method}")
+            logger.info(f"Password changed successfully for user '{username}'")
             return True
             
         except Exception as e:
