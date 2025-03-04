@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.fernet import Fernet
 from cryptography.exceptions import InvalidTag
 import base64
 import hashlib
@@ -139,7 +140,7 @@ class CryptoManager:
 
     def _derive_key_encryption_key(self, password: str, salt: bytes = None) -> bytes:
         """
-        Derive a key for encrypting the signing key using PBKDF2.
+        Derive a key for encrypting the signing key using Argon2id.
         
         Args:
             password (str): Master password
@@ -151,12 +152,13 @@ class CryptoManager:
         if salt is None:
             salt = os.urandom(16)
             
-        # Use PBKDF2 with high iteration count for key encryption
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
+        # Use Argon2id with high memory and time cost for master key
+        kdf = Argon2id(
             length=32,
             salt=salt,
-            iterations=480000,  # Very high iteration count for master key
+            iterations=10,         # Time cost
+            lanes=8,               # Parallelism
+            memory_cost=262144     # Memory cost - 256 MB
         )
         
         key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
