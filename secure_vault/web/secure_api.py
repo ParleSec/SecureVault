@@ -10,6 +10,7 @@ from functools import wraps
 import tempfile
 from pathlib import Path
 import os
+from dotenv import load_dotenv
 import time
 import secrets
 import logging
@@ -27,10 +28,22 @@ import traceback
 import random
 
 # Import persistent token blocklist
-from secure_vault.web.token_blocklist import TokenBlocklist, is_token_revoked
+from secure_vault.web.token_blocklist import is_token_revoked as global_is_token_revoked
+from secure_vault.web.token_blocklist import TokenBlocklist
 
 # Import user management for authentication
 from secure_vault.users.user_manager import UserManager
+
+# Configure Admin_Key
+root_dir = Path(__file__).parent.absolute()
+env_path = root_dir / '.env'
+load_dotenv(dotenv_path=env_path)
+admin_key = os.getenv('SECUREVAULT_ADMIN_KEY')
+
+if admin_key:
+    print(f"Admin key loaded (length: {len(admin_key)})")
+else:
+    print("WARNING: SECUREVAULT_ADMIN_KEY not found in environment variables")
 
 # Configure logging
 logging.basicConfig(
@@ -125,9 +138,6 @@ class SecureAPI:
         else:
             logger.info(f"Using existing SECRET_KEY: {self.app.config['SECRET_KEY'][:10]}...")
         
-        # Blocklist for revoked tokens
-        self.token_blocklist = set()
-        
         # Ensure upload directory exists
         upload_folder = self.app.config['UPLOAD_FOLDER']
         os.makedirs(upload_folder, exist_ok=True)
@@ -136,6 +146,42 @@ class SecureAPI:
         if not getattr(self.app, '_routes_initialized', False):
             self._initialize_routes()
             self.app._routes_initialized = True
+
+        self.fix_token_blocklist_initialization()
+
+    def fix_token_blocklist_initialization(self):
+        """
+        Ensure token_blocklist is properly initialized.
+        This is a safety mechanism to make sure we don't have type confusion.
+        """
+        try:
+            from secure_vault.web.token_blocklist import TokenBlocklist
+            
+            # Check if token_blocklist is not already a TokenBlocklist instance
+            if not hasattr(self, 'token_blocklist') or not isinstance(self.token_blocklist, TokenBlocklist):
+                logger.warning("Reinitializing token_blocklist as a proper TokenBlocklist instance")
+                self.token_blocklist = TokenBlocklist(self.user_db_path)
+                
+                # Update module globals
+                try:
+                    from secure_vault.web.token_blocklist import _global_token_blocklist
+                    # Reload global token blocklist from database
+                    conn = sqlite3.connect(self.user_db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT token_signature FROM revoked_tokens")
+                    signatures = [row[0] for row in cursor.fetchall()]
+                    conn.close()
+                    
+                    # Update the global set
+                    _global_token_blocklist.update(signatures)
+                    logger.info(f"Reloaded {len(signatures)} tokens into global blocklist")
+                except Exception as e:
+                    logger.error(f"Failed to reload global token blocklist: {e}")
+        except Exception as e:
+            logger.error(f"Failed to fix token_blocklist initialization: {e}")
+            # Ensure there's at least a set for blocklisted tokens if all else fails
+            if not hasattr(self, 'token_blocklist'):
+                self.token_blocklist = set()
 
     def _initialize_routes(self):
         """Initialize API routes with security decorators."""
@@ -161,8 +207,29 @@ class SecureAPI:
                     return jsonify({'error': 'Missing authentication token'}), 401
                     
                 try:
-                    # Use the global function instead of instance method
-                    if is_token_revoked(token):
+                    # Check if token is revoked - handle both global function and instance method
+                    is_revoked = False
+                    
+                    # Try instance method first if available
+                    if hasattr(self.token_blocklist, 'is_revoked'):
+                        try:
+                            is_revoked = self.token_blocklist.is_revoked(token)
+                        except Exception as e:
+                            logger.warning(f"Instance token check failed: {e}")
+                            
+                            # Fallback to global function
+                            try:
+                                token_parts = token.split('.')
+                                if len(token_parts) == 3:
+                                    token_signature = token_parts[2]
+                                    
+                                    # Check global blocklist directly
+                                    from secure_vault.web.token_blocklist import _global_token_blocklist
+                                    is_revoked = token_signature in _global_token_blocklist
+                            except Exception as e2:
+                                logger.warning(f"Global token check failed: {e2}")
+                    
+                    if is_revoked:
                         logger.warning(f"Token is blocklisted: {token[:10]}...")
                         raise JWTError("Token has been revoked")
                     
@@ -190,8 +257,9 @@ class SecureAPI:
                 return f(*args, **kwargs)
             return decorated
 
+
         @self.app.route('/api/auth', methods=['POST'])
-        @self.limiter.limit("5 per minute")
+        @self.limiter.limit("25 per minute")
         def authenticate():
             """Secure authentication endpoint with user verification."""
             # Get credentials from either Basic Auth or form data
@@ -320,6 +388,7 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"List files failed: {e}")
                 return jsonify({'error': 'Failed to list files'}), 500
+        self.csrf.exempt(list_files)
 
         @self.app.route('/api/files', methods=['POST'])
         @require_auth
@@ -423,47 +492,144 @@ class SecureAPI:
                 return jsonify({'error': 'Delete failed'}), 500
         self.csrf.exempt(delete_file)
 
+
         @self.app.route('/api/auth/revoke', methods=['POST'])
         @require_auth
         def revoke_token():
             """Revoke the current authentication token."""
-            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            auth_header = request.headers.get('Authorization', '')
+            
+            # Extract the token properly
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+            else:
+                token = auth_header
+                
             try:
+                # Log the revocation attempt
+                logger.info(f"Token revocation attempt by user {g.username}")
+                
+                # Get token signature
+                token_parts = token.split('.')
+                if len(token_parts) != 3:
+                    return jsonify({'error': 'Invalid token format'}), 400
+                    
+                token_signature = token_parts[2]
+                
                 # Decode the token to get its payload
                 payload = jwt.decode(token, self.app.config['SECRET_KEY'], algorithms=['HS256'])
                 
-                # Add token to persistent blocklist - this updates both the DB and the in-memory set
-                if self.token_blocklist.add_token(token, payload):
+                # Attempt to revoke using proper TokenBlocklist instance if available
+                success = False
+                
+                if hasattr(self.token_blocklist, 'add_token'):
+                    # Try using the TokenBlocklist instance
+                    try:
+                        success = self.token_blocklist.add_token(token, payload)
+                    except Exception as e:
+                        logger.error(f"Failed to add token to TokenBlocklist: {e}")
+                
+                # Fallback: add to global blocklist directly if we're using a set
+                if not success and isinstance(self.token_blocklist, set):
+                    try:
+                        # Get the global blocklist from the token_blocklist module
+                        from secure_vault.web.token_blocklist import _global_token_blocklist
+                        # Add the token signature to both the global set and the instance set
+                        _global_token_blocklist.add(token_signature)
+                        self.token_blocklist.add(token_signature)
+                        success = True
+                        logger.info(f"Added token to global blocklist directly")
+                    except Exception as e:
+                        logger.error(f"Failed to add token to global blocklist: {e}")
+                
+                if success:
                     logger.info(f"Token revoked successfully for user {g.username}")
                     return jsonify({'message': 'Token revoked successfully'})
                 else:
-                    logger.error(f"Failed to revoke token for user {g.username}")
-                    return jsonify({'error': 'Failed to revoke token'}), 500
-            except JWTError as e:
+                    # Last resort: try direct database storage
+                    try:
+                        conn = sqlite3.connect(self.user_db_path)
+                        cursor = conn.cursor()
+                        
+                        # Extract necessary info from payload
+                        jti = payload.get('jti', secrets.token_hex(16))
+                        user_id = str(payload.get('sub', ''))
+                        expires_at = datetime.fromtimestamp(payload.get('exp', 0), tz=timezone.utc)
+                        
+                        # Create the table if it doesn't exist
+                        cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS revoked_tokens (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            jti TEXT UNIQUE NOT NULL,
+                            token_signature TEXT UNIQUE NOT NULL,
+                            user_id TEXT NOT NULL,
+                            revoked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            expires_at TIMESTAMP NOT NULL,
+                            metadata TEXT
+                        )
+                        ''')
+                        
+                        # Insert the token
+                        cursor.execute(
+                            '''
+                            INSERT INTO revoked_tokens (jti, token_signature, user_id, expires_at, metadata)
+                            VALUES (?, ?, ?, ?, ?)
+                            ''', 
+                            (jti, token_signature, user_id, expires_at.isoformat(), '{}')
+                        )
+                        conn.commit()
+                        conn.close()
+                        
+                        # Add to global set
+                        from secure_vault.web.token_blocklist import _global_token_blocklist
+                        _global_token_blocklist.add(token_signature)
+                        
+                        logger.info(f"Token manually added to database and global set for user {g.username}")
+                        return jsonify({'message': 'Token revoked successfully (manual method)'}), 200
+                        
+                    except Exception as e:
+                        logger.error(f"All token revocation methods failed: {e}")
+                        return jsonify({'error': 'Failed to revoke token'}), 500
+            except jwt.InvalidTokenError as e:
                 logger.error(f"Invalid token in revocation request: {e}")
                 return jsonify({'error': 'Invalid token'}), 401
+            except Exception as e:
+                logger.error(f"Error in token revocation: {e}")
+                return jsonify({'error': f'Token revocation failed: {str(e)}'}), 500
         self.csrf.exempt(revoke_token)
-            
+
         @self.app.route('/api/maintenance/cleanup-tokens', methods=['POST'])
         def cleanup_tokens():
-            """Cleanup expired tokens from the blocklist (admin only)."""
-            # Only allow access from localhost
-            if request.remote_addr not in ['127.0.0.1', 'localhost']:
-                return jsonify({'error': 'Access denied'}), 403
-                
+            """Clean up expired tokens endpoint - admin access only."""
             # Verify admin key
             admin_key = request.headers.get('X-Admin-Key')
             expected_admin_key = os.getenv('SECUREVAULT_ADMIN_KEY')
             
-            if admin_key != expected_admin_key:
-                return jsonify({'error': 'Invalid admin key'}), 403
-                
-            # Perform cleanup
-            removed_count = self.token_blocklist.cleanup_expired_tokens()
-            return jsonify({
-                'message': 'Token cleanup completed',
-                'tokens_removed': removed_count
-            })
+            if not admin_key or admin_key != expected_admin_key:
+                logger.warning("Unauthorized token cleanup attempt")
+                return jsonify({'error': 'Unauthorized - Invalid or missing admin key'}), 403
+            
+            try:
+                # Call the cleanup method on token_blocklist
+                if hasattr(self.token_blocklist, 'cleanup_expired_tokens'):
+                    removed = self.token_blocklist.cleanup_expired_tokens()
+                    logger.info(f"Admin-triggered cleanup removed {removed} expired tokens")
+                    return jsonify({
+                        'message': 'Cleanup successful',
+                        'tokens_removed': removed
+                    })
+                else:
+                    # Fallback if the method doesn't exist (using a set)
+                    logger.warning("Token blocklist doesn't support cleanup_expired_tokens method")
+                    return jsonify({
+                        'message': 'Cleanup not supported with current token blocklist implementation',
+                        'tokens_removed': 0
+                    })
+            
+            except Exception as e:
+                logger.error(f"Error cleaning up expired tokens: {e}")
+                return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
+            
         self.csrf.exempt(cleanup_tokens)
         
         @self.app.route('/api/users/register', methods=['POST'])
@@ -511,7 +677,6 @@ class SecureAPI:
         @self.app.route('/api/debug/jwt', methods=['GET'])
         def debug_jwt():
             """Debug endpoint for JWT token validation."""
-            api_instance = self  # Store reference to self
             
             # Only allow access from localhost
             if request.remote_addr not in ['127.0.0.1', 'localhost']:
@@ -519,7 +684,12 @@ class SecureAPI:
                 
             # Get token from header
             auth_header = request.headers.get('Authorization', '')
-            token = auth_header.replace('Bearer ', '')
+            
+            # Extract token properly
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+            else:
+                token = auth_header
             
             if not token:
                 return jsonify({
@@ -557,15 +727,15 @@ class SecureAPI:
                 try:
                     decoded = jwt.decode(
                         token,
-                        api_instance.app.config['SECRET_KEY'],
+                        self.app.config['SECRET_KEY'],
                         algorithms=['HS256']
                     )
                     verification_result = {'verified': True, 'decoded': decoded}
                 except Exception as e:
                     verification_result = {'verified': False, 'error': str(e)}
                 
-                # Check if token is revoked
-                is_revoked = api_instance.token_blocklist.is_revoked(token)
+                # Check if token is revoked using the instance method, not the global function
+                is_revoked = self.token_blocklist.is_revoked(token)
                 
                 return jsonify({
                     'token': token,
@@ -574,8 +744,8 @@ class SecureAPI:
                     'verification': verification_result,
                     'is_revoked': is_revoked,
                     'app_config': {
-                        'secret_key_length': len(api_instance.app.config['SECRET_KEY']),
-                        'jwt_expiration_hours': api_instance.app.config['JWT_EXPIRATION_HOURS']
+                        'secret_key_length': len(self.app.config['SECRET_KEY']),
+                        'jwt_expiration_hours': self.app.config['JWT_EXPIRATION_HOURS']
                     }
                 })
             except Exception as e:

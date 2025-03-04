@@ -4,14 +4,15 @@ TokenBlocklist - Persistent revoked token storage for SecureVault
 import sqlite3
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Set
 import json
-import functools
+import threading
 
 logger = logging.getLogger(__name__)
 
-# Create a global blocklist for tokens
+# Create a global blocklist for tokens and a lock for thread safety
 _global_token_blocklist = set()
+_blocklist_lock = threading.RLock()
 
 class TokenBlocklist:
     """
@@ -71,9 +72,11 @@ class TokenBlocklist:
             signatures = [row[0] for row in cursor.fetchall()]
             conn.close()
             
-            # Update the global set
-            _global_token_blocklist = set(signatures)
-            logger.info(f"Loaded {len(_global_token_blocklist)} revoked tokens into memory")
+            # Update the global set with thread safety
+            with _blocklist_lock:
+                _global_token_blocklist.update(signatures)
+            
+            logger.info(f"Loaded {len(signatures)} revoked tokens into memory")
         except Exception as e:
             logger.error(f"Failed to load tokens into memory: {e}")
     
@@ -122,9 +125,9 @@ class TokenBlocklist:
             conn.commit()
             conn.close()
             
-            # Add to in-memory set
-            global _global_token_blocklist
-            _global_token_blocklist.add(token_signature)
+            # Add to in-memory set with thread safety
+            with _blocklist_lock:
+                _global_token_blocklist.add(token_signature)
             
             logger.info(f"Token revoked for user {user_id}")
             return True
@@ -157,9 +160,9 @@ class TokenBlocklist:
             token_signature = token_parts[2]
             
             # First check the in-memory set (fast)
-            global _global_token_blocklist
-            if token_signature in _global_token_blocklist:
-                return True
+            with _blocklist_lock:
+                if token_signature in _global_token_blocklist:
+                    return True
             
             # Double-check the database (more reliable but slower)
             conn = sqlite3.connect(self.db_path)
@@ -172,10 +175,12 @@ class TokenBlocklist:
             conn.close()
             
             # If found in database but not in memory, update memory
-            if count > 0 and token_signature not in _global_token_blocklist:
-                _global_token_blocklist.add(token_signature)
+            if count > 0:
+                with _blocklist_lock:
+                    _global_token_blocklist.add(token_signature)
+                return True
             
-            return count > 0
+            return False
             
         except Exception as e:
             logger.error(f"Error checking token revocation status: {e}")
@@ -212,9 +217,10 @@ class TokenBlocklist:
             conn.commit()
             conn.close()
             
-            # Update in-memory set
-            global _global_token_blocklist
-            _global_token_blocklist -= set(expired_signatures)
+            # Update in-memory set with thread safety
+            if expired_signatures:
+                with _blocklist_lock:
+                    _global_token_blocklist.difference_update(expired_signatures)
             
             if removed_count > 0:
                 logger.info(f"Removed {removed_count} expired tokens from blocklist")
@@ -225,19 +231,31 @@ class TokenBlocklist:
             logger.error(f"Failed to cleanup expired tokens: {e}")
             return 0
 
-# Create simplified functions that don't rely on instance methods
+# Create global function to check if a token is revoked
 def is_token_revoked(token: str) -> bool:
-    """Global function to check if a token is revoked"""
+    """
+    Global function to check if a token is revoked.
+    This uses the in-memory blocklist for performance.
+    
+    Args:
+        token: The JWT token to check
+        
+    Returns:
+        bool: True if the token is revoked, False otherwise
+    """
     try:
         # Get token signature (third part)
         token_parts = token.split('.')
         if len(token_parts) != 3:
-            return False
+            logger.warning("Invalid token format in global check")
+            return False  # Can't determine if it's revoked
         
         token_signature = token_parts[2]
         
-        # Check the in-memory set
-        return token_signature in _global_token_blocklist
+        # Check the in-memory set with thread safety
+        with _blocklist_lock:
+            return token_signature in _global_token_blocklist
+            
     except Exception as e:
         logger.error(f"Error in global token check: {e}")
-        return True  # Fail closed
+        return True  # Fail closed for security
