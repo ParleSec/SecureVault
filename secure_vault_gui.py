@@ -1053,9 +1053,19 @@ class SecureVaultGUI:
             return
             
         self.status_var.set("Decrypting file...")
+        temp_path = None
         
         def perform_decryption():
+            nonlocal temp_path
             try:
+                # Create a temporary file for initial decryption
+                import tempfile
+                fd, temp_path = tempfile.mkstemp(suffix='.tmp', prefix='securevault_')
+                os.close(fd)
+                
+                # Log the temporary file creation
+                self.log_message(f"Created temporary file for decryption: {temp_path}", "INFO")
+                
                 response = self.session.post(
                     f"{self.api_url}/files/{file_name}",
                     data={'password': password},
@@ -1063,10 +1073,14 @@ class SecureVaultGUI:
                 )
                 
                 if response.status_code == 200:
-                    # Save the decrypted content
-                    with open(output_path, 'wb') as f:
+                    # Save the decrypted content to the temporary file first
+                    with open(temp_path, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=8192):
                             f.write(chunk)
+                    
+                    # Now copy from temporary file to final destination
+                    import shutil
+                    shutil.copy2(temp_path, output_path)
                     
                     # Update UI in main thread
                     def update_after_decrypt():
@@ -1087,6 +1101,36 @@ class SecureVaultGUI:
                 self.log_message(error_msg, "ERROR")
                 self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
                 self.status_var.set("Decryption error")
+            
+            finally:
+                # Secure deletion of temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        # Secure multi-pass overwrite
+                        file_size = os.path.getsize(temp_path)
+                        with open(temp_path, 'wb') as f:
+                            # Pass 1: Random data
+                            f.write(os.urandom(file_size))
+                            f.flush()
+                            os.fsync(f.fileno())
+                            
+                            # Pass 2: Zeros
+                            f.seek(0)
+                            f.write(b'\x00' * file_size)
+                            f.flush()
+                            os.fsync(f.fileno())
+                            
+                            # Pass 3: Ones
+                            f.seek(0)
+                            f.write(b'\xFF' * file_size)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        
+                        # Finally remove the file
+                        os.remove(temp_path)
+                        self.log_message(f"Securely deleted temporary file: {temp_path}", "INFO")
+                    except Exception as e:
+                        self.log_message(f"Failed to securely delete temporary file {temp_path}: {e}", "ERROR")
         
         # Run in thread
         threading.Thread(target=perform_decryption).start()
