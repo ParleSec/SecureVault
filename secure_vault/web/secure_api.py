@@ -642,38 +642,112 @@ class SecureAPI:
                 return jsonify({'error': 'File not found'}), 404
             
             temp_path = None
+            secure_temp_file = None
+            
             try:
-                fd, temp_path = tempfile.mkstemp()
-                os.close(fd)
-                self.vault.decrypt_file(encrypted_path, temp_path, password)
-                # Remove only the trailing '.vault' suffix to restore the original filename.
-                if filename.endswith('.vault'):
-                    original_filename = filename[:-6]
-                else:
-                    original_filename = filename
-                response = send_file(
-                    temp_path,
-                    as_attachment=True,
-                    download_name=original_filename,
-                    max_age=0
-                )
-                response.headers['Content-Disposition'] = (
-                    "attachment; filename=\"{0}\"; filename*=UTF-8''{0}".format(original_filename)
-                )
-                response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-                response.headers['Pragma'] = 'no-cache'
-                response.headers['X-Content-Type-Options'] = 'nosniff'
-                return response
+                # Use the SecureTempFile class for guaranteed secure deletion
+                try:
+                    from secure_vault.security.files import SecureTempFile
+                    with SecureTempFile(suffix='.tmp', prefix='securevault_') as temp_path:
+                        self.vault.decrypt_file(encrypted_path, temp_path, password)
+                        
+                        # Remove only the trailing '.vault' suffix to restore the original filename.
+                        if filename.endswith('.vault'):
+                            original_filename = filename[:-6]
+                        else:
+                            original_filename = filename
+                            
+                        response = send_file(
+                            temp_path,
+                            as_attachment=True,
+                            download_name=original_filename,
+                            max_age=0
+                        )
+                        response.headers['Content-Disposition'] = (
+                            "attachment; filename=\"{0}\"; filename*=UTF-8''{0}".format(original_filename)
+                        )
+                        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+                        response.headers['Pragma'] = 'no-cache'
+                        response.headers['X-Content-Type-Options'] = 'nosniff'
+                        
+                        # Store temp_path for cleanup in after_request
+                        if not hasattr(g, 'pending_temp_files'):
+                            g.pending_temp_files = []
+                        g.pending_temp_files.append(temp_path)
+                        
+                        return response
+                except ImportError:
+                    # Fallback if SecureTempFile isn't available
+                    import tempfile
+                    import os
+                    
+                    fd, temp_path = tempfile.mkstemp()
+                    try:
+                        os.close(fd)
+                        self.vault.decrypt_file(encrypted_path, temp_path, password)
+                        
+                        # Remove only the trailing '.vault' suffix to restore the original filename.
+                        if filename.endswith('.vault'):
+                            original_filename = filename[:-6]
+                        else:
+                            original_filename = filename
+                            
+                        response = send_file(
+                            temp_path,
+                            as_attachment=True,
+                            download_name=original_filename,
+                            max_age=0
+                        )
+                        response.headers['Content-Disposition'] = (
+                            "attachment; filename=\"{0}\"; filename*=UTF-8''{0}".format(original_filename)
+                        )
+                        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+                        response.headers['Pragma'] = 'no-cache'
+                        response.headers['X-Content-Type-Options'] = 'nosniff'
+                        
+                        # Add to pending files to be deleted
+                        self.app.config['PENDING_TEMP_FILES'] = (
+                            self.app.config.get('PENDING_TEMP_FILES', []) + [temp_path]
+                        )
+                        
+                        return response
+                    finally:
+                        # Ensure immediate secure deletion if an error occurs
+                        if temp_path and os.path.exists(temp_path):
+                            try:
+                                # Securely delete the file
+                                file_size = os.path.getsize(temp_path)
+                                with open(temp_path, 'wb') as f:
+                                    # Pass 1: Random data
+                                    f.write(os.urandom(file_size))
+                                    f.flush()
+                                    os.fsync(f.fileno())
+                                    # Pass 2: Zeros
+                                    f.seek(0)
+                                    f.write(b'\x00' * file_size)
+                                    f.flush()
+                                    os.fsync(f.fileno())
+                                    # Pass 3: Ones
+                                    f.seek(0)
+                                    f.write(b'\xFF' * file_size)
+                                    f.flush()
+                                    os.fsync(f.fileno())
+                                # Remove the file
+                                os.unlink(temp_path)
+                            except Exception as e:
+                                logger.error(f"Failed to securely delete temp file {temp_path}: {e}")
+                                # Try simple delete as a last resort
+                                try:
+                                    os.unlink(temp_path)
+                                except Exception:
+                                    pass
+                        
             except ValueError as e:
+                # Handle validation/decryption errors
                 return jsonify({'error': str(e)}), 400
             except Exception as e:
                 logger.error(f"Decryption failed: {e}")
                 return jsonify({'error': 'Decryption failed'}), 500
-            finally:
-                if temp_path and os.path.exists(temp_path):
-                    self.app.config['PENDING_TEMP_FILES'] = (
-                        self.app.config.get('PENDING_TEMP_FILES', []) + [temp_path]
-                    )
         self.csrf.exempt(decrypt_file)
 
         @self.app.route('/api/files/<filename>', methods=['DELETE'])
@@ -977,16 +1051,97 @@ class SecureAPI:
                 'retry_after': error.description
             }), 429
 
-        @self.app.before_request
-        def cleanup_temp_files():
-            """Clean up temporary files before each request."""
+        @self.app.after_request
+        def secure_cleanup_temp_files(response):
+            """Securely clean up temporary files after each request."""
+            # Check for pending files in Flask g object
+            pending_g_files = getattr(g, 'pending_temp_files', [])
+            for temp_path in pending_g_files:
+                try:
+                    if os.path.exists(temp_path):
+                        # Get file size for secure overwrite
+                        try:
+                            file_size = os.path.getsize(temp_path)
+                            
+                            # Securely delete the file with multiple passes
+                            with open(temp_path, 'wb') as f:
+                                # Pass 1: Random data
+                                f.write(os.urandom(file_size))
+                                f.flush()
+                                os.fsync(f.fileno())
+                                
+                                # Pass 2: Zeros
+                                f.seek(0)
+                                f.write(b'\x00' * file_size)
+                                f.flush()
+                                os.fsync(f.fileno())
+                                
+                                # Pass 3: Ones
+                                f.seek(0)
+                                f.write(b'\xFF' * file_size)
+                                f.flush()
+                                os.fsync(f.fileno())
+                                
+                            # Finally remove the file
+                            os.unlink(temp_path)
+                            logger.debug(f"Securely deleted temporary file: {temp_path}")
+                            
+                        except Exception as e:
+                            logger.error(f"Error during secure deletion of {temp_path}: {e}")
+                            # Fallback to standard deletion if secure deletion fails
+                            try:
+                                os.unlink(temp_path)
+                                logger.warning(f"Used fallback standard deletion for {temp_path}")
+                            except Exception as fallback_e:
+                                logger.error(f"Fallback deletion also failed for {temp_path}: {fallback_e}")
+                except Exception as e:
+                    logger.error(f"Failed to clean up temporary file {temp_path}: {e}")
+            
+            # Also check old pending files in app config
             temp_files = self.app.config.pop('PENDING_TEMP_FILES', [])
             for temp_path in temp_files:
                 try:
                     if os.path.exists(temp_path):
-                        os.remove(temp_path)
+                        # Get file size for secure overwrite
+                        try:
+                            file_size = os.path.getsize(temp_path)
+                            
+                            # Securely delete the file with multiple passes
+                            with open(temp_path, 'wb') as f:
+                                # Pass 1: Random data
+                                f.write(os.urandom(file_size))
+                                f.flush()
+                                os.fsync(f.fileno())
+                                
+                                # Pass 2: Zeros
+                                f.seek(0)
+                                f.write(b'\x00' * file_size)
+                                f.flush()
+                                os.fsync(f.fileno())
+                                
+                                # Pass 3: Ones
+                                f.seek(0)
+                                f.write(b'\xFF' * file_size)
+                                f.flush()
+                                os.fsync(f.fileno())
+                                
+                            # Finally remove the file
+                            os.unlink(temp_path)
+                            logger.debug(f"Securely deleted temporary file: {temp_path}")
+                            
+                        except Exception as e:
+                            logger.error(f"Error during secure deletion of {temp_path}: {e}")
+                            # Fallback to standard deletion if secure deletion fails
+                            try:
+                                os.unlink(temp_path)
+                                logger.warning(f"Used fallback standard deletion for {temp_path}")
+                            except Exception as fallback_e:
+                                logger.error(f"Fallback deletion also failed for {temp_path}: {fallback_e}")
                 except Exception as e:
-                    logger.error(f"Failed to remove temp file: {e}")
+                    logger.error(f"Failed to clean up temporary file {temp_path}: {e}")
+            
+            # Return the response to continue the request chain
+            return response
         
         @self.app.before_request
         def cleanup_expired_tokens_periodically():
