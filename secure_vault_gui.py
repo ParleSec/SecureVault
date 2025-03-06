@@ -670,7 +670,7 @@ class SecureVaultGUI:
         
         def check_connection():
             # Define update functions in the outer scope
-            def update_gui(message, level="INFO", show_error=False):
+            def update_gui_status(message, level="INFO", show_error=False):
                 if not hasattr(self, 'window') or not self.window.winfo_exists():
                     return
                 try:
@@ -687,26 +687,26 @@ class SecureVaultGUI:
                 
                 if response.status_code == 200:
                     msg = f"Server connection successful: {response.status_code}"
-                    self.window.after(0, lambda: update_gui(msg,"INFO"))
+                    self.window.after(0, lambda: update_gui_status(msg, "INFO"))
                     return True
                 else:
                     msg = f"Unexpected response: {response.status_code}"
-                    self.window.after(0, lambda: update_gui(msg, "WARNING"))
+                    self.window.after(0, lambda: update_gui_status(msg, "WARNING"))
                     return True
                     
             except requests.exceptions.SSLError:
                 msg = "SSL certificate verification failed. Using self-signed certificate?"
-                self.window.after(0, lambda: update_gui(msg, "WARNING"))
+                self.window.after(0, lambda: update_gui_status(msg, "WARNING"))
                 return True
-                
+                    
             except requests.exceptions.ConnectionError:
                 msg = f"Cannot connect to server at {self.api_url}.\nIs the server running?"
-                self.window.after(0, lambda: update_gui(msg, "ERROR", True))
+                self.window.after(0, lambda: update_gui_status(msg, "ERROR", True))
                 return False
-                
+                    
             except Exception as e:
                 msg = f"Connection error: {str(e)}"
-                self.window.after(0, lambda: update_gui(msg, "ERROR", True))
+                self.window.after(0, lambda: update_gui_status(msg, "ERROR", True))
                 return False
         
         # Run in thread
@@ -814,7 +814,7 @@ class SecureVaultGUI:
             
             # Log token for debugging
             if csrf_token:
-                self.log_message(f"Using CSRF token for {url}: {csrf_token[:5]}...{csrf_token[-5:] if len(csrf_token) > 10 else ''}", "DEBUG")
+                self.log_message(f"Using CSRF token for {url} (token present: {csrf_token is not None})", "DEBUG")
             else:
                 self.log_message(f"No CSRF token found for {url}", "WARNING")
                 

@@ -589,7 +589,7 @@ class SecureAPI:
                         algorithm='HS256'
                     )
                     
-                    logger.info(f"Generated JWT token for user {username}: {token[:30]}...")
+                    logger.info(f"Generated JWT token for user {username} (token ID: {payload['jti']})")
                     
                     # Return successful authentication response
                     return jsonify({
@@ -1382,36 +1382,29 @@ class SecureAPI:
     
     def run(self, host='localhost', port=5000, ssl_context=None, **kwargs):
         """
-        Run the secure API server with SSL support.
-        If an SSL context is provided, it is used; otherwise, a self-signed
-        certificate is generated for development.
+        Run the secure API server with SSL support with enhanced security warnings.
         """
-        # Log server start with database info
-        user_count = 0
-        try:
-            import sqlite3
-            conn = sqlite3.connect(self.user_db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM users")
-            user_count = cursor.fetchone()[0]
-            conn.close()
-        except Exception as e:
-            logger.warning(f"Could not count users in database: {e}")
-            
-        # Log CSRF protection status
-        logger.info("CSRF Protection Status:")
-        logger.info(f"- CSRF Protection Enabled: Yes")
-        logger.info(f"- CSRF Cookie SameSite: {self.app.config.get('CSRF_COOKIE_SAMESITE', 'Lax')}")
-        logger.info(f"- CSRF Cookie Secure: {self.app.config.get('CSRF_COOKIE_SECURE', True)}")
-        logger.info(f"- Exempted endpoints: authenticate, cleanup_tokens, debug_jwt")
-            
-        logger.info(f"Starting API server with user database: {self.user_db_path} ({user_count} users)")
-        
         if ssl_context:
             self.app.run(host=host, port=port, ssl_context=ssl_context, **kwargs)
         else:
-            from secure_vault.web.https_config import ensure_valid_cert_exists
+            from secure_vault.web.https_config import ensure_valid_cert_exists, validate_certificate
             cert_path, key_path = ensure_valid_cert_exists()
+            
+            # Validate the certificate and show clear warnings
+            is_valid, reason = validate_certificate(cert_path)
+            if not is_valid:
+                logger.critical(f"Invalid certificate: {reason}")
+                raise ValueError(f"Cannot start server with invalid certificate: {reason}")
+            
+            # Show prominent warnings for self-signed certificates
+            if "Self-signed" in reason:
+                border = "!" * 80
+                logger.warning(border)
+                logger.warning("SECURITY WARNING: Using self-signed certificate")
+                logger.warning("This is NOT SECURE for production use.")
+                logger.warning("Clients will see certificate warnings.")
+                logger.warning(border)
+            
             self.app.run(host=host, port=port, ssl_context=(cert_path, key_path), **kwargs)
 
     def cleanup(self):
