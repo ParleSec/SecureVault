@@ -144,7 +144,13 @@ def setup_auth_routes(self):
         @self.app.route('/api/auth/revoke', methods=['POST'])
         def revoke_token():
             """Revoke the current token"""
+            logger.info("Using revoke_token from auth.py")
             token = request.headers.get('Authorization', '').replace('Bearer ', '')
+
+            if hasattr(self.app, 'csrf'):
+                self.app.csrf.exempt(revoke_token)
+            elif hasattr(self, 'csrf'):
+                self.csrf.exempt(revoke_token)
             
             if not token:
                 return jsonify({'error': 'Missing token'}), 401

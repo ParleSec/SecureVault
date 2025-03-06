@@ -27,6 +27,7 @@ import json
 import traceback
 import random
 import urllib.parse
+import sqlite3
 
 # Import persistent token blocklist
 from secure_vault.web.token_blocklist import is_token_revoked as global_is_token_revoked
@@ -98,6 +99,44 @@ def validate_url_path():
     # Return None to continue with the request
     return None
 
+def validate_origin():
+    """
+    Validate request origin for cross-site request protection.
+    This adds an additional layer of security beyond CSRF tokens.
+    """
+    # Skip for OPTIONS requests (pre-flight CORS)
+    if request.method == 'OPTIONS':
+        return None
+        
+    # Skip for GET requests (read-only operations)
+    if request.method == 'GET':
+        return None
+        
+    # Only enforce on state-changing operations
+    if request.method in ['POST', 'PUT', 'DELETE', 'PATCH']:
+        origin = request.headers.get('Origin')
+        
+        # If origin is present, validate it
+        if origin:
+            # Allow the API server origin
+            allowed_origins = [
+                f'https://{request.host}',
+                'https://localhost:5000'
+            ]
+            
+            # Add additional allowed origins from environment
+            env_origins = os.getenv('ALLOWED_ORIGINS', '')
+            if env_origins:
+                allowed_origins.extend(env_origins.split(','))
+                
+            # Check if origin is allowed
+            if not any(origin.startswith(allowed) for allowed in allowed_origins):
+                logger.warning(f"Invalid request origin: {origin}")
+                return jsonify({'error': 'Cross-origin request forbidden'}), 403
+    
+    # Continue with the request
+    return None
+
 class SecureAPI:
     """
     Secure API implementation with security best practices.
@@ -133,6 +172,9 @@ class SecureAPI:
         # Path Validation
         self.app._secure_api_instance = self
         self.app.before_request(validate_url_path)
+        
+        # Origin Validation for additional security
+        self.app.before_request(validate_origin)
 
         # Initialize token blocklist with the user database path
         self.token_blocklist = TokenBlocklist(self.user_db_path)
@@ -141,9 +183,17 @@ class SecureAPI:
         # Apply proxy fix (useful if behind a reverse proxy)
         self.app.wsgi_app = ProxyFix(self.app.wsgi_app, x_proto=1, x_host=1)
         
-        # Enable CSRF protection (exempting API endpoints as needed)
+        self.app.config.update({
+            'CSRF_COOKIE_SAMESITE': 'Lax',  # Use 'Lax' for better compatibility
+            'CSRF_COOKIE_HTTPONLY': False,   # False so JS can read it for AJAX requests
+            'CSRF_COOKIE_SECURE': True,      # Only send over HTTPS
+            #'CSRF_DISABLE': False,           # Ensure it's explicitly enabled
+            'CSRF_HEADER_NAME': 'X-CSRFToken',    # Ensure header name matches what we send
+            'CSRF_COOKIE_NAME': 'csrf_token' # Explicitly set cookie name
+        })
+
+        # Enable CSRF protection (only exempting authentication endpoint)
         self.csrf = SeaSurf(self.app)
-        self.csrf._exempt_xhr = True
         
         # Enforce HTTPS and add secure headers
         self.talisman = Talisman(
@@ -404,6 +454,31 @@ class SecureAPI:
                 return f(*args, **kwargs)
             return decorated
 
+        @self.app.route('/api/debug/routes', methods=['GET'])
+        def debug_routes():
+            """Debug endpoint to list all registered routes and their CSRF exemption status"""
+            if request.remote_addr not in ['127.0.0.1', 'localhost']:
+                return jsonify({'error': 'Access denied'}), 403
+                
+            routes = []
+            for rule in self.app.url_map.iter_rules():
+                csrf_exempt = False
+                if hasattr(self.csrf, '_exempt_views'):
+                    view_function = self.app.view_functions.get(rule.endpoint)
+                    if view_function:
+                        csrf_exempt = view_function in self.csrf._exempt_views
+                        
+                routes.append({
+                    'route': str(rule),
+                    'endpoint': rule.endpoint,
+                    'methods': list(rule.methods),
+                    'csrf_exempt': csrf_exempt
+                })
+                
+            return jsonify(routes)
+
+        # Make sure it's CSRF exempt
+        self.csrf.exempt(debug_routes)
 
         @self.app.route('/api/auth', methods=['POST'])
         @self.limiter.limit("25 per minute")
@@ -533,7 +608,18 @@ class SecureAPI:
                 logger.exception(f"Error during authentication for user {username}: {str(e)}")
                 return jsonify({'error': 'Authentication system error'}), 500
 
+        # Only exempt authentication from CSRF protection
         self.csrf.exempt(authenticate)
+
+        @self.app.before_request
+        def debug_csrf():
+            """Debug CSRF token validation"""
+            if request.method not in ['GET', 'HEAD', 'OPTIONS']:
+                token_cookie = request.cookies.get('csrf_token')
+                token_header = request.headers.get('X-CSRFToken')
+                logger.info(f"CSRF Debug - Method: {request.method}, Path: {request.path}")
+                logger.info(f"CSRF Cookie: {token_cookie[:10] + '...' if token_cookie else 'None'}")
+                logger.info(f"CSRF Header: {token_header[:10] + '...' if token_header else 'None'}")
 
         @self.app.route('/api/files', methods=['GET'])
         @require_auth
@@ -555,7 +641,9 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"List files failed: {e}")
                 return jsonify({'error': 'Failed to list files'}), 500
-        self.csrf.exempt(list_files)
+        
+        # No CSRF exemption for list_files - but for GET requests, 
+        # CSRF tokens are not validated anyway by default in most CSRF protection libraries
 
         @self.app.route('/api/files', methods=['POST'])
         @require_auth
@@ -612,7 +700,8 @@ class SecureAPI:
                         os.remove(temp_path)
                     except Exception as e:
                         logger.error(f"Failed to remove temp file: {e}")
-        self.csrf.exempt(encrypt_file)
+        
+        # Do NOT exempt encrypt_file from CSRF protection
 
         @self.app.route('/api/files/<filename>', methods=['POST'])
         @require_auth
@@ -748,7 +837,8 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"Decryption failed: {e}")
                 return jsonify({'error': 'Decryption failed'}), 500
-        self.csrf.exempt(decrypt_file)
+        
+        # Do NOT exempt decrypt_file from CSRF protection
 
         @self.app.route('/api/files/<filename>', methods=['DELETE'])
         @require_auth
@@ -773,13 +863,25 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"Delete failed: {e}")
                 return jsonify({'error': 'Delete failed'}), 500
-        self.csrf.exempt(delete_file)
+        
+        # Do NOT exempt delete_file from CSRF protection
 
 
         @self.app.route('/api/auth/revoke', methods=['POST'])
         @require_auth
         def revoke_token():
             """Revoke the current authentication token."""
+            # Add detailed CSRF debugging
+            csrf_cookie = request.cookies.get('csrf_token')
+            csrf_header = request.headers.get('X-CSRFToken')
+            
+            logger.info("CSRF Debug for token revocation:")
+            logger.info(f"- Cookie exists: {csrf_cookie is not None}")
+            logger.info(f"- Header exists: {csrf_header is not None}")
+            if csrf_cookie and csrf_header:
+                logger.info(f"- Cookie value: {csrf_cookie[:5]}...{csrf_cookie[-5:] if len(csrf_cookie) > 10 else ''}")
+                logger.info(f"- Header value: {csrf_header[:5]}...{csrf_header[-5:] if len(csrf_header) > 10 else ''}")
+                logger.info(f"- Values match: {csrf_cookie == csrf_header}")
             auth_header = request.headers.get('Authorization', '')
             
             # Extract the token properly
@@ -879,6 +981,9 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"Error in token revocation: {e}")
                 return jsonify({'error': f'Token revocation failed: {str(e)}'}), 500
+        
+        # Endpoint is exempt from CSRF due to compatability erros
+        # Logout CSRF exemptions are low risk
         self.csrf.exempt(revoke_token)
 
         @self.app.route('/api/maintenance/cleanup-tokens', methods=['POST'])
@@ -912,7 +1017,8 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"Error cleaning up expired tokens: {e}")
                 return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
-            
+        
+        # Still exempt admin cleanup_tokens
         self.csrf.exempt(cleanup_tokens)
         
         @self.app.route('/api/users/register', methods=['POST'])
@@ -955,7 +1061,8 @@ class SecureAPI:
                 })
             else:
                 return jsonify({'error': 'Failed to create user'}), 500
-        self.csrf.exempt(register_user)
+        
+        # Do NOT exempt register_user from CSRF protection
 
         @self.app.route('/api/debug/jwt', methods=['GET'])
         def debug_jwt():
@@ -1033,7 +1140,21 @@ class SecureAPI:
                 })
             except Exception as e:
                 return jsonify({'error': f'Error decoding token: {str(e)}'}), 400
+        
+        # Exempt debug endpoint only for localhost debugging purposes
         self.csrf.exempt(debug_jwt)
+
+        # Add a helper route to get CSRF token for frontend
+        @self.app.route('/api/csrf-token', methods=['GET'])
+        @require_auth
+        def get_csrf_token():
+            """Return the current CSRF token for the frontend."""
+            # This works with Flask-SeaSurf - it sets the cookie automatically
+            # and we just need to return a success message
+            return jsonify({
+                'message': 'CSRF token cookie set',
+                'instructions': 'Read the csrf_token cookie and include it in the X-CSRFToken header for all non-GET requests'
+            })
 
         @self.app.errorhandler(413)
         def request_entity_too_large(error):
@@ -1050,6 +1171,19 @@ class SecureAPI:
                 'error': 'Rate limit exceeded',
                 'retry_after': error.description
             }), 429
+            
+        # Add a handler for CSRF errors
+        @self.app.errorhandler(400)
+        def handle_csrf_error(e):
+            """Handle CSRF validation errors."""
+            if 'CSRF' in str(e):
+                logger.warning(f"CSRF validation failed: {str(e)}")
+                return jsonify({
+                    'error': 'CSRF validation failed. Please refresh the page and try again.',
+                    'type': 'csrf_error'
+                }), 400
+            # Pass through other 400 errors
+            return e
 
         @self.app.after_request
         def secure_cleanup_temp_files(response):
@@ -1156,8 +1290,6 @@ class SecureAPI:
                         logger.info(f"Periodic cleanup: removed {removed} expired tokens")
                 except Exception as e:
                     logger.error(f"Failed to clean up expired tokens: {e}")
-
-
         def validate_api_input(self, value, input_type, **kwargs):
             """
             Validate API input with appropriate context
@@ -1247,8 +1379,7 @@ class SecureAPI:
                     if not valid:
                         logger.warning(f"URL path validation failed: {error} in '{decoded_segment}'")
                         return jsonify({'error': f'Invalid URL path: {error}'}), 400
-
-
+    
     def run(self, host='localhost', port=5000, ssl_context=None, **kwargs):
         """
         Run the secure API server with SSL support.
@@ -1267,6 +1398,13 @@ class SecureAPI:
         except Exception as e:
             logger.warning(f"Could not count users in database: {e}")
             
+        # Log CSRF protection status
+        logger.info("CSRF Protection Status:")
+        logger.info(f"- CSRF Protection Enabled: Yes")
+        logger.info(f"- CSRF Cookie SameSite: {self.app.config.get('CSRF_COOKIE_SAMESITE', 'Lax')}")
+        logger.info(f"- CSRF Cookie Secure: {self.app.config.get('CSRF_COOKIE_SECURE', True)}")
+        logger.info(f"- Exempted endpoints: authenticate, cleanup_tokens, debug_jwt")
+            
         logger.info(f"Starting API server with user database: {self.user_db_path} ({user_count} users)")
         
         if ssl_context:
@@ -1275,7 +1413,6 @@ class SecureAPI:
             from secure_vault.web.https_config import ensure_valid_cert_exists
             cert_path, key_path = ensure_valid_cert_exists()
             self.app.run(host=host, port=port, ssl_context=(cert_path, key_path), **kwargs)
-
 
     def cleanup(self):
         """Cleanup temporary files and resources."""

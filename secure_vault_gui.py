@@ -22,6 +22,7 @@ import logging
 from datetime import datetime, timezone
 import secrets
 import atexit
+import http.cookiejar
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent))  # Add the current directory to Python path
 from secure_vault.users.login_manager import LoginManager
@@ -200,6 +201,9 @@ class SecureVaultGUI:
         
         # Initialize server first
         success = self.initialize_server()
+
+        # Initialize CSRF
+
         
         # Close loading window
         try:
@@ -233,6 +237,7 @@ class SecureVaultGUI:
             'User-Agent': 'SecureVaultGUI/1.0'
         })
         
+        self.session.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(rfc2965=True))
         # Set up theme
         self.setup_theme()
         
@@ -740,26 +745,166 @@ class SecureVaultGUI:
             self.login_status_var.set("Authentication error: No password available")
             self.login_manager.show_login_dialog(self.window, self.on_login_success)
 
-    def login_with_api(self, password):
+    def get_csrf_token(self):
+        """Get CSRF token from session cookies with enhanced debugging"""
+        all_cookies = [f"{c.name}: {c.value[:10]}..." if len(c.value) > 10 else f"{c.name}: {c.value}" for c in self.session.cookies]
+        self.log_message(f"Current cookies: {all_cookies}", "DEBUG")
+        
+        for cookie in self.session.cookies:
+            if cookie.name == 'csrf_token':
+                return cookie.value
+        
+        self.log_message("CSRF token not found in cookies", "WARNING")
+        return None
+
+    def fetch_csrf_token(self):
+        """Fetch a CSRF token from the API server"""
+        if not hasattr(self, 'token') or not self.token:
+            self.log_message("Cannot fetch CSRF token: Not authenticated", "WARNING")
+            return False
+            
+        try:
+            self.log_message("Fetching CSRF token from server", "INFO")
+            # Make sure to include the Authorization header
+            headers = {"Authorization": f"Bearer {self.token}"}
+            
+            # Request a fresh CSRF token
+            response = self.session.get(
+                f"{self.api_url}/csrf-token", 
+                headers=headers,
+                verify=self.verify_ssl
+            )
+            
+            if response.status_code == 200:
+                # Print all cookies for debugging
+                self.log_message(f"Cookies after fetch: {[c.name for c in self.session.cookies]}", "DEBUG")
+                
+                # The token is automatically set as a cookie
+                csrf_token = None
+                for cookie in self.session.cookies:
+                    if cookie.name == 'csrf_token':
+                        csrf_token = cookie.value
+                        self.log_message(f"CSRF token obtained successfully: {csrf_token[:10] if len(csrf_token) > 10 else csrf_token}", "INFO")
+                        return True
+                
+                # If we didn't find a csrf_token cookie
+                self.log_message("CSRF token not found in cookies", "WARNING")
+                return False
+            else:
+                self.log_message(f"Failed to fetch CSRF token: {response.status_code} - {response.text}", "WARNING")
+                return False
+        except Exception as e:
+            self.log_message(f"Error fetching CSRF token: {e}", "ERROR")
+            return False
+
+    def add_csrf_to_request(self, method, url, **kwargs):
+        """Helper to add CSRF token to requests and handle errors"""
+        # Only add CSRF for non-GET methods
+        if method.upper() not in ['GET', 'HEAD', 'OPTIONS']:
+            # Get CSRF token from cookies
+            csrf_token = None
+            for cookie in self.session.cookies:
+                if cookie.name == 'csrf_token':
+                    csrf_token = cookie.value
+                    break
+            
+            # Log token for debugging
+            if csrf_token:
+                self.log_message(f"Using CSRF token for {url}: {csrf_token[:5]}...{csrf_token[-5:] if len(csrf_token) > 10 else ''}", "DEBUG")
+            else:
+                self.log_message(f"No CSRF token found for {url}", "WARNING")
+                
+                # Try to fetch a token if we don't have one
+                if hasattr(self, 'token') and self.token:
+                    self.log_message("Attempting to fetch CSRF token", "INFO")
+                    response = self.session.get(f"{self.api_url}/csrf-token", headers={"Authorization": f"Bearer {self.token}"})
+                    self.log_message(f"CSRF token fetch response: {response.status_code}", "DEBUG")
+                    
+                    # Check if we got a token
+                    for cookie in self.session.cookies:
+                        if cookie.name == 'csrf_token':
+                            csrf_token = cookie.value
+                            self.log_message(f"New CSRF token: {csrf_token[:5]}...{csrf_token[-5:] if len(csrf_token) > 10 else ''}", "INFO")
+                            break
+            
+            # Add token to headers if we have one
+            if csrf_token:
+                headers = kwargs.get('headers', {})
+                headers['X-CSRFToken'] = csrf_token
+                kwargs['headers'] = headers
+        
+        # Make the request
+        return getattr(self.session, method.lower())(url, **kwargs)
+
+    def login_with_api(self, api_key=None):
         """Login to the API server with current credentials."""
         self.status_var.set("Logging in to API...")
         
+        # Store api_key in a container that can be accessed from the nested function
+        auth_data = {'api_key': api_key}
+        
         def perform_login():
             try:
-                # Log the authentication attempt
-                self.log_message(f"Attempting API authentication for user: {self.username}", "INFO")
+                # Use API key if provided, otherwise generate a new one
+                if not auth_data['api_key']:
+                    import secrets
+                    auth_data['api_key'] = f"sk_securevault_{secrets.token_hex(16)}"
                 
-                # Use only form data for authentication - keeping it simple
-                form_data = {
-                    'username': self.username,
-                    'password': password  # Use the actual password
+                # Step 1: First get a CSRF token by making a GET request
+                self.log_message("Getting CSRF token from server...", "INFO")
+                
+                # Clear existing cookies to start fresh
+                self.session.cookies.clear()
+                
+                try:
+                    # Make a GET request to get CSRF cookie
+                    self.session.get(
+                        f"{self.api_url}/files", 
+                        timeout=5,
+                        verify=False
+                    )
+                    
+                    # Extract CSRF token from cookies
+                    csrf_token = None
+                    for cookie in self.session.cookies:
+                        if 'csrf' in cookie.name.lower():
+                            csrf_token = cookie.value
+                            self.log_message(f"Found CSRF token in cookie: {cookie.name}", "INFO")
+                            break
+                    
+                    if not csrf_token:
+                        self.log_message("No CSRF token found in cookies", "WARNING")
+                except Exception as e:
+                    self.log_message(f"Error getting CSRF token: {e}", "WARNING")
+                    csrf_token = None
+                
+                # Step 2: Make the auth request with the CSRF token
+                self.log_message("Attempting API authentication with CSRF token...", "INFO")
+                
+                headers = {
+                    'X-CSRFToken': csrf_token if csrf_token else '',
+                    'X-Requested-With': 'XMLHttpRequest',  # This helps identify AJAX requests
+                    'Referer': 'https://localhost:5000/',  # Required for CSRF validation
+                    'Origin': 'https://localhost:5000'  # Required for CSRF validation
                 }
                 
-                # Make a simple POST request without headers that might confuse the server
+                # Create form data with CSRF token
+                form_data = {
+                    'username': self.username,
+                    'password': auth_data['api_key']
+                }
+                
+                # Add CSRF token to form data if available
+                if csrf_token:
+                    form_data['csrf_token'] = csrf_token
+                
+                # Make the auth request with proper CSRF handling
                 response = self.session.post(
                     f"{self.api_url}/auth",
                     data=form_data,
-                    verify=False
+                    headers=headers,
+                    verify=False,
+                    auth=(self.username, auth_data['api_key'])  # Include as both auth and form data
                 )
                 
                 # Handle the response
@@ -769,6 +914,11 @@ class SecureVaultGUI:
                     if self.token:
                         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
                         self.log_message(f"User {self.username} logged in to API successfully", "INFO")
+                        
+                        # After successful login, fetch a CSRF token for future requests
+                        self.log_message("Fetching initial CSRF token after login", "INFO")
+                        if not self.fetch_csrf_token():
+                            self.log_message("Warning: Could not obtain CSRF token after login", "WARNING")
                         
                         # Switch to main interface
                         self.window.after(0, self.show_main_interface)
@@ -780,6 +930,8 @@ class SecureVaultGUI:
                     # Log detailed error information for debugging
                     self.log_message(f"API login failed: {response.status_code}", "ERROR")
                     self.log_message(f"Response text: {response.text}", "ERROR")
+                    self.log_message(f"CSRF token used: {csrf_token}", "INFO")
+                    self.log_message(f"Headers sent: {headers}", "INFO")
                     
                     # Extract error message if available
                     error_msg = f"API login failed: {response.status_code}"
@@ -799,8 +951,7 @@ class SecureVaultGUI:
                 self.window.after(0, lambda: self.login_manager.show_login_dialog(self.window, self.on_login_success))
         
         # Run in thread to avoid freezing UI
-        threading.Thread(target=perform_login, daemon=True).start()
-
+        threading.Thread(target=perform_login).start()
 
     def login(self):
         """Legacy login method - redirects to the secure login dialog"""
@@ -974,7 +1125,7 @@ class SecureVaultGUI:
         threading.Thread(target=fetch_file_details).start()
 
     def encrypt_file(self):
-        """Select and encrypt a file"""
+        """Select and encrypt a file with CSRF protection"""
         self._update_activity_time()
         file_path = filedialog.askopenfilename(title="Select File to Encrypt")
         if not file_path:
@@ -990,6 +1141,14 @@ class SecureVaultGUI:
         
         def perform_encryption():
             try:
+                # Get CSRF token
+                csrf_token = self.get_csrf_token()
+                
+                # Prepare headers with CSRF token
+                headers = {}
+                if csrf_token:
+                    headers['X-CSRFToken'] = csrf_token
+                
                 with open(file_path, 'rb') as f:
                     files = {'file': (file_name, f)}
                     data = {'password': password}
@@ -997,7 +1156,8 @@ class SecureVaultGUI:
                     response = self.session.post(
                         f"{self.api_url}/files",
                         files=files,
-                        data=data
+                        data=data,
+                        headers=headers  # Include CSRF token
                     )
                     
                 if response.status_code == 200:
@@ -1011,6 +1171,46 @@ class SecureVaultGUI:
                         self.log_message(f"Encrypted file: {file_name}", "INFO")
                         
                     self.window.after(0, update_after_encrypt)
+                    
+                elif response.status_code == 400 and "CSRF" in response.text:
+                    # Handle CSRF error by fetching a new token and retrying
+                    self.log_message("CSRF validation failed, refreshing token and retrying", "WARNING")
+                    
+                    if self.fetch_csrf_token():
+                        # Retry with new token
+                        csrf_token = self.get_csrf_token()
+                        if csrf_token:
+                            headers['X-CSRFToken'] = csrf_token
+                            
+                            with open(file_path, 'rb') as f:
+                                files = {'file': (file_name, f)}
+                                data = {'password': password}
+                                
+                                response = self.session.post(
+                                    f"{self.api_url}/files",
+                                    files=files,
+                                    data=data,
+                                    headers=headers
+                                )
+                            
+                            if response.status_code == 200:
+                                result = response.json()
+                                
+                                # Update UI in main thread after retry
+                                def update_after_encrypt():
+                                    self.refresh_file_list()
+                                    messagebox.showinfo("Success", f"File encrypted successfully: {result.get('file', '')}")
+                                    self.status_var.set("File encrypted successfully")
+                                    self.log_message(f"Encrypted file: {file_name}", "INFO")
+                                    
+                                self.window.after(0, update_after_encrypt)
+                                return
+                    
+                    # If we get here, retry failed
+                    error_msg = "CSRF token validation failed"
+                    self.log_message(error_msg, "ERROR")
+                    self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
+                    self.status_var.set("Encryption failed - CSRF error")
                     
                 else:
                     error_msg = f"Encryption failed: {response.status_code}"
@@ -1028,7 +1228,7 @@ class SecureVaultGUI:
         threading.Thread(target=perform_encryption).start()
 
     def decrypt_file(self):
-        """Decrypt the selected file"""
+        """Decrypt the selected file with CSRF protection"""
         self._update_activity_time()
         selection = self.file_listbox.curselection()
         if not selection:
@@ -1053,34 +1253,29 @@ class SecureVaultGUI:
             return
             
         self.status_var.set("Decrypting file...")
-        temp_path = None
         
         def perform_decryption():
-            nonlocal temp_path
             try:
-                # Create a temporary file for initial decryption
-                import tempfile
-                fd, temp_path = tempfile.mkstemp(suffix='.tmp', prefix='securevault_')
-                os.close(fd)
+                # Get CSRF token
+                csrf_token = self.get_csrf_token()
                 
-                # Log the temporary file creation
-                self.log_message(f"Created temporary file for decryption: {temp_path}", "INFO")
+                # Prepare headers with CSRF token
+                headers = {}
+                if csrf_token:
+                    headers['X-CSRFToken'] = csrf_token
                 
                 response = self.session.post(
                     f"{self.api_url}/files/{file_name}",
                     data={'password': password},
+                    headers=headers,  # Include CSRF token
                     stream=True
                 )
                 
                 if response.status_code == 200:
-                    # Save the decrypted content to the temporary file first
-                    with open(temp_path, 'wb') as f:
+                    # Save the decrypted content
+                    with open(output_path, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=8192):
                             f.write(chunk)
-                    
-                    # Now copy from temporary file to final destination
-                    import shutil
-                    shutil.copy2(temp_path, output_path)
                     
                     # Update UI in main thread
                     def update_after_decrypt():
@@ -1089,6 +1284,44 @@ class SecureVaultGUI:
                         self.log_message(f"Decrypted file: {file_name}", "INFO")
                         
                     self.window.after(0, update_after_decrypt)
+                    
+                elif response.status_code == 400 and "CSRF" in response.text:
+                    # Handle CSRF error by fetching a new token and retrying
+                    self.log_message("CSRF validation failed, refreshing token and retrying", "WARNING")
+                    
+                    if self.fetch_csrf_token():
+                        # Retry with new token
+                        csrf_token = self.get_csrf_token()
+                        if csrf_token:
+                            headers['X-CSRFToken'] = csrf_token
+                            
+                            response = self.session.post(
+                                f"{self.api_url}/files/{file_name}",
+                                data={'password': password},
+                                headers=headers,
+                                stream=True
+                            )
+                            
+                            if response.status_code == 200:
+                                # Save the decrypted content after retry
+                                with open(output_path, 'wb') as f:
+                                    for chunk in response.iter_content(chunk_size=8192):
+                                        f.write(chunk)
+                                
+                                # Update UI in main thread
+                                def update_after_decrypt():
+                                    messagebox.showinfo("Success", "File decrypted successfully!")
+                                    self.status_var.set("File decrypted successfully")
+                                    self.log_message(f"Decrypted file: {file_name}", "INFO")
+                                    
+                                self.window.after(0, update_after_decrypt)
+                                return
+                    
+                    # If we get here, retry failed
+                    error_msg = "CSRF token validation failed"
+                    self.log_message(error_msg, "ERROR")
+                    self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
+                    self.status_var.set("Decryption failed - CSRF error")
                     
                 else:
                     error_msg = f"Decryption failed: {response.status_code}"
@@ -1101,42 +1334,12 @@ class SecureVaultGUI:
                 self.log_message(error_msg, "ERROR")
                 self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
                 self.status_var.set("Decryption error")
-            
-            finally:
-                # Secure deletion of temporary file
-                if temp_path and os.path.exists(temp_path):
-                    try:
-                        # Secure multi-pass overwrite
-                        file_size = os.path.getsize(temp_path)
-                        with open(temp_path, 'wb') as f:
-                            # Pass 1: Random data
-                            f.write(os.urandom(file_size))
-                            f.flush()
-                            os.fsync(f.fileno())
-                            
-                            # Pass 2: Zeros
-                            f.seek(0)
-                            f.write(b'\x00' * file_size)
-                            f.flush()
-                            os.fsync(f.fileno())
-                            
-                            # Pass 3: Ones
-                            f.seek(0)
-                            f.write(b'\xFF' * file_size)
-                            f.flush()
-                            os.fsync(f.fileno())
-                        
-                        # Finally remove the file
-                        os.remove(temp_path)
-                        self.log_message(f"Securely deleted temporary file: {temp_path}", "INFO")
-                    except Exception as e:
-                        self.log_message(f"Failed to securely delete temporary file {temp_path}: {e}", "ERROR")
         
         # Run in thread
         threading.Thread(target=perform_decryption).start()
 
     def delete_file(self):
-        """Delete selected file(s) with password confirmation"""
+        """Delete selected file(s) with password confirmation and CSRF protection"""
         self._update_activity_time()
         
         # Check if any files are selected
@@ -1250,8 +1453,11 @@ class SecureVaultGUI:
                             status_var.set(f"Deleting: {file_name}")
                             progress_dialog.update()
                         
-                        # Delete the file
-                        response = self.session.delete(f"{self.api_url}/files/{file_name}")
+                        # Use the helper method to handle CSRF tokens
+                        response = self.add_csrf_to_request(
+                            'DELETE',
+                            f"{self.api_url}/files/{file_name}"
+                        )
                         
                         if response.status_code == 200:
                             success_count += 1
@@ -1328,8 +1534,7 @@ class SecureVaultGUI:
         
         # Set security icon
         try:
-            # If you have a security icon, uncomment this
-            # dialog.iconbitmap('resources/security.ico')
+            dialog.iconbitmap('resources/security.ico')
             pass
         except:
             pass  # Icon failed to load, continue anyway
@@ -1468,7 +1673,14 @@ class SecureVaultGUI:
             
         def perform_logout():
             try:
-                response = self.session.post(f"{self.api_url}/auth/revoke")
+                # Use the helper method for CSRF handling
+                response = self.add_csrf_to_request(
+                    'POST',
+                    f"{self.api_url}/auth/revoke"
+                )
+                
+                # Log the response for debugging
+                self.log_message(f"Logout response: {response.status_code} - {response.text}", "INFO")
                 
                 # Clear token regardless of response
                 self.token = None
@@ -1477,12 +1689,6 @@ class SecureVaultGUI:
                 # Clear local user session
                 self.login_manager.logout()
                 self.username = None
-                
-                # Log result
-                if response.status_code == 200:
-                    self.log_message("Logged out successfully", "INFO")
-                else:
-                    self.log_message(f"Logout issue: {response.status_code} - {response.text}", "WARNING")
                 
             except Exception as e:
                 self.log_message(f"Logout error: {e}", "ERROR")
