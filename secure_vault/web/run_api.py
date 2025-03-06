@@ -9,6 +9,7 @@ from pathlib import Path
 from secure_vault.core.vault import SecureVault
 from secure_vault.web.secure_api import SecureAPI
 import logging
+from dotenv import load_dotenv
 import argparse
 
 # Configure logging
@@ -17,6 +18,26 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('securevault_api')
+
+# Load environment variables
+env_path = Path('.').resolve() / '.env'
+load_result = load_dotenv(dotenv_path=env_path)
+if load_result:
+    logger.info(f"Loaded environment variables from {env_path}")
+else:
+    # Try parent directory (for when run from a subdirectory)
+    parent_env_path = Path('.').resolve().parent / '.env'
+    parent_load_result = load_dotenv(dotenv_path=parent_env_path)
+    if parent_load_result:
+        logger.info(f"Loaded environment variables from {parent_env_path}")
+    else:
+        logger.warning("Could not load environment variables from .env file")
+        
+# Log the master password existence (not the value)
+if os.getenv('VAULT_MASTER_PASSWORD'):
+    logger.info("VAULT_MASTER_PASSWORD is set")
+else:
+    logger.warning("VAULT_MASTER_PASSWORD is not set")
 
 def main():
     # Process command-line arguments
@@ -39,8 +60,16 @@ def main():
     # Configure vault directory
     vault_dir = args.vault_dir or os.getenv('VAULT_DIR', './encrypted_vault')
     
-    # Get master password from args or environment
+    # Get master password from args, environment, or prompt
     master_password = args.master_password or os.getenv('VAULT_MASTER_PASSWORD')
+    
+    if not master_password:
+        import getpass
+        print("VAULT_MASTER_PASSWORD not found in environment variables.")
+        master_password = getpass.getpass("Enter master password for vault encryption: ")
+        if not master_password:
+            logger.error("No master password provided. Exiting.")
+            sys.exit(1)
     
     # Initialize the secure vault
     vault = SecureVault(vault_dir, master_password)

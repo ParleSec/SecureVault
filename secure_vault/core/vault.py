@@ -91,52 +91,34 @@ class CryptoManager:
 
     def _get_master_password(self, master_password: str = None) -> str:
         """
-        Get the master password from parameter, environment variable, or generate a new one.
+        Get the master password from parameter or environment variable.
+        Never persist the password to disk.
         
         Args:
             master_password (str, optional): Master password provided during initialization.
-            
+                
         Returns:
             str: The master password to use for key encryption.
+        
+        Raises:
+            SecurityError: If no master password is available
         """
         # First, try using the provided password
         if master_password:
             return master_password
-            
+                
         # Second, try environment variable
         env_password = os.getenv('VAULT_MASTER_PASSWORD')
         if env_password:
             return env_password
-            
-        # Third, try reading from password file
-        if self.password_file.exists():
-            try:
-                with open(self.password_file, 'r') as f:
-                    return f.read().strip()
-            except Exception as e:
-                self.logger.warning("Failed to read master password file", error=str(e))
-                
-        # Finally, generate a new secure random password
-        new_password = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8')
-        try:
-            # Save password with restricted permissions
-            with open(self.password_file, 'w') as f:
-                f.write(new_password)
-                
-            # Set secure permissions on the password file
-            try:
-                if os.name == 'posix':  # Unix-like systems
-                    import stat
-                    os.chmod(self.password_file, stat.S_IRUSR | stat.S_IWUSR)  # Owner read/write only
-            except Exception as e:
-                self.logger.warning("Failed to set permissions on password file", error=str(e))
-                
-            self.logger.info("Generated new master password and saved to file", path=str(self.password_file))
-            return new_password
-        except Exception as e:
-            self.logger.warning("Failed to save master password", error=str(e))
-            # Return the generated password even if we couldn't save it
-            return new_password
+        
+        # If no master password is available, raise an error
+        # rather than generating and storing one
+        from secure_vault.security.errors import SecureError
+        raise SecureError(
+            "No master password provided. Please provide a master password via parameter "
+            "or set the VAULT_MASTER_PASSWORD environment variable."
+        )
 
     def _derive_key_encryption_key(self, password: str, salt: bytes = None) -> bytes:
         """

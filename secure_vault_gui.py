@@ -14,7 +14,6 @@ import urllib3
 from pathlib import Path
 import base64
 import platform
-import sys
 import subprocess
 import signal
 import time
@@ -24,8 +23,13 @@ import secrets
 import atexit
 import http.cookiejar
 from pathlib import Path
+from dotenv import load_dotenv
 sys.path.append(str(Path(__file__).parent))  # Add the current directory to Python path
 from secure_vault.users.login_manager import LoginManager
+
+# Load environment variables
+env_path = Path('.') / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Configure logging
 logging.basicConfig(
