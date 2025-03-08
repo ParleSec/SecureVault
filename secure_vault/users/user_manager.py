@@ -90,25 +90,12 @@ class UserManager:
                 return False
             
             # Import security validator for enhanced validation
-            from secure_vault.utils.input_validation import security_validator
-            
-            # Enhanced validation for username
-            valid, error = security_validator.validate_input(
-                username,
-                check_sql=True,
-                check_xss=True,
-                check_path=False,
-                check_command=False,
-                context="text"
-            )
-            if not valid:
-                logger.warning(f"User creation failed: invalid username format - {error}")
-                return False
-            
-            # Enhanced validation for email if provided
-            if email:
+            try:
+                from secure_vault.utils.input_validation import security_validator
+                
+                # Enhanced validation for username
                 valid, error = security_validator.validate_input(
-                    email,
+                    username,
                     check_sql=True,
                     check_xss=True,
                     check_path=False,
@@ -116,8 +103,25 @@ class UserManager:
                     context="text"
                 )
                 if not valid:
-                    logger.warning(f"User creation failed: invalid email format - {error}")
+                    logger.warning(f"User creation failed: invalid username format - {error}")
                     return False
+                
+                # Enhanced validation for email if provided
+                if email:
+                    valid, error = security_validator.validate_input(
+                        email,
+                        check_sql=True,
+                        check_xss=True,
+                        check_path=False,
+                        check_command=False,
+                        context="text"
+                    )
+                    if not valid:
+                        logger.warning(f"User creation failed: invalid email format - {error}")
+                        return False
+            except ImportError:
+                # Skip enhanced validation if module not available
+                logger.warning("Security validator module not available, skipping enhanced validation")
             
             # Validate password
             valid, error_msg = self._validate_password(password)
@@ -130,7 +134,7 @@ class UserManager:
             salt_b64 = base64.b64encode(salt).decode('utf-8')
             
             # Hash the password with the salt
-            password_hash = self._hash_password(password, salt)
+            password_hash, hash_method = self._hash_password(password, salt)
             
             # Generate API key for this user
             api_key = secrets.token_hex(32)
@@ -140,10 +144,10 @@ class UserManager:
             cursor = conn.cursor()
             cursor.execute(
                 '''
-                INSERT INTO users (username, password_hash, password_salt, email, api_key)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO users (username, password_hash, password_salt, hash_method, email, api_key)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ''', 
-                (username, password_hash, salt_b64, email, api_key)
+                (username, password_hash, salt_b64, hash_method, email, api_key)
             )
             conn.commit()
             conn.close()
@@ -296,18 +300,22 @@ class UserManager:
             return False
         
         # Additional security check on new password
-        from secure_vault.utils.input_validation import security_validator
-        valid, error = security_validator.validate_input(
-            new_password,
-            check_sql=True,
-            check_xss=True, 
-            check_path=False,
-            check_command=False,
-            context="password"
-        )
-        if not valid:
-            logger.warning(f"Password change failed: security check failed - {error}")
-            return False
+        try:
+            from secure_vault.utils.input_validation import security_validator
+            valid, error = security_validator.validate_input(
+                new_password,
+                check_sql=True,
+                check_xss=True, 
+                check_path=False,
+                check_command=False,
+                context="password"
+            )
+            if not valid:
+                logger.warning(f"Password change failed: security check failed - {error}")
+                return False
+        except ImportError:
+            # Skip enhanced validation if module not available
+            logger.warning("Security validator module not available, skipping enhanced validation")
         
         try:
             # Generate new salt
@@ -315,14 +323,14 @@ class UserManager:
             salt_b64 = base64.b64encode(salt).decode('utf-8')
             
             # Hash the new password
-            password_hash = self._hash_password(new_password, salt)
+            password_hash, hash_method = self._hash_password(new_password, salt)
             
             # Update the database
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE users SET password_hash = ?, password_salt = ? WHERE username = ?",
-                (password_hash, salt_b64, username)
+                "UPDATE users SET password_hash = ?, password_salt = ?, hash_method = ? WHERE username = ?",
+                (password_hash, salt_b64, hash_method, username)
             )
             conn.commit()
             conn.close()

@@ -58,6 +58,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def validate_url_path():
     """
     Validate URL path for security concerns before processing the request.
@@ -144,6 +145,12 @@ class SecureAPI:
     and deletion.
     """
     def __init__(self, vault, user_db_path=None):
+        # Kill any existing processes on port 5000
+        # I spent 6 hours rewriting code only to realise
+        ## I had a residual Docker process Listening on port 5000
+        port = int(os.getenv('PORT', 5000))
+        self.kill_processes_on_port(port)
+
         self.app = Flask(__name__)
         self.vault = vault
         
@@ -244,6 +251,65 @@ class SecureAPI:
             self.app._routes_initialized = True
 
         self.fix_token_blocklist_initialization()
+
+    def kill_processes_on_port(self, port=5000):
+        """
+        Kill any processes listening on the specified port.
+        This is useful to ensure the API server can start without port conflicts.
+        
+        Args:
+            port: The port number to check (default: 5000)
+        
+        Returns:
+            bool: True if processes were found and killed, False otherwise
+        """
+        import platform
+        import subprocess
+        import os
+        import signal
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f"Checking for processes on port {port}")
+        
+        system = platform.system()
+        killed = False
+        
+        try:
+            if system == "Windows":
+                # Windows: use netstat to find the processes
+                output = subprocess.check_output(
+                    f'netstat -ano | findstr :{port}',
+                    shell=True
+                ).decode()
+                
+                # Extract PIDs
+                pids = set()
+                for line in output.splitlines():
+                    if f":{port}" in line:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            pids.add(int(parts[4]))
+                
+                # Kill each process
+                for pid in pids:
+                    logger.info(f"Killing process PID {pid} on port {port}")
+                    try:
+                        subprocess.run(f'taskkill /F /PID {pid}', shell=True)
+                        killed = True
+                    except subprocess.SubprocessError as e:
+                        logger.error(f"Failed to kill process {pid}: {e}")
+            
+            if killed:
+                logger.info(f"Successfully killed processes on port {port}")
+            else:
+                logger.info(f"No processes found on port {port}")
+            
+            return killed
+            
+        except Exception as e:
+            logger.error(f"Error checking for processes on port {port}: {e}")
+            return False
 
     def fix_token_blocklist_initialization(self):
         """
