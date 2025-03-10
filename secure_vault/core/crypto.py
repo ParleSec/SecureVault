@@ -84,8 +84,18 @@ class CryptoManager:
         )
         return kdf.derive(password.encode())
 
-    def encrypt(self, data: bytes, password: str) -> EncryptedData:
-        """Encrypt data using AES-256-GCM with authenticated encryption"""
+    def encrypt(self, data: bytes, password: str):
+        """
+        Encrypt data using AES-256-GCM with authenticated encryption.
+        This is a wrapper around the original encrypt implementation to ensure compatibility.
+        
+        Args:
+            data (bytes): The data to encrypt
+            password (str): The password to use for encryption
+            
+        Returns:
+            EncryptedData: Object containing the encrypted data and metadata
+        """
         try:
             nonce = os.urandom(12)
             key = self.derive_key(password)

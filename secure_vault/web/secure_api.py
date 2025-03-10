@@ -148,8 +148,8 @@ class SecureAPI:
         # Kill any existing processes on port 5000
         # I spent 6 hours rewriting code only to realise
         ## I had a residual Docker process Listening on port 5000
-        port = int(os.getenv('PORT', 5000))
-        self.kill_processes_on_port(port)
+        #port = int(os.getenv('PORT', 5000))
+        #self.kill_processes_on_port(port)
 
         self.app = Flask(__name__)
         self.vault = vault
@@ -252,7 +252,7 @@ class SecureAPI:
 
         self.fix_token_blocklist_initialization()
 
-    def kill_processes_on_port(self, port=5000):
+    '''def kill_processes_on_port(self, port=5000):
         """
         Kill any processes listening on the specified port.
         This is useful to ensure the API server can start without port conflicts.
@@ -309,7 +309,7 @@ class SecureAPI:
             
         except Exception as e:
             logger.error(f"Error checking for processes on port {port}: {e}")
-            return False
+            return False'''
 
     def fix_token_blocklist_initialization(self):
         """
@@ -751,12 +751,18 @@ class SecureAPI:
             temp_path = os.path.join(self.app.config['UPLOAD_FOLDER'], original_filename)
             try:
                 file.save(temp_path)
-                # The vault.encrypt_file method now uses file_path.name to preserve the original filename.
-                encrypted_path = self.vault.encrypt_file(temp_path, password)
-                return jsonify({
-                    'message': 'File encrypted successfully',
-                    'file': encrypted_path.name  # e.g., "document.pdf.vault"
-                })
+                
+                # Call the vault's encrypt_file method directly, which knows how to handle the crypto operations
+                try:
+                    encrypted_path = self.vault.encrypt_file(temp_path, password)
+                    return jsonify({
+                        'message': 'File encrypted successfully',
+                        'file': encrypted_path.name  # e.g., "document.pdf.vault"
+                    })
+                except Exception as e:
+                    logger.error(f"Encryption error: {str(e)}")
+                    return jsonify({'error': f'Encryption failed: {str(e)}'}), 500
+                    
             except Exception as e:
                 logger.error(f"Encryption failed: {e}")
                 return jsonify({'error': 'Encryption failed'}), 500

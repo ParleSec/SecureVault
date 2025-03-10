@@ -313,6 +313,47 @@ class CryptoManager:
                             error=str(e))
             raise
 
+    def encrypt(self, data: bytes, password: str):
+        """
+        Encrypt data using AES-256-GCM with authenticated encryption.
+        This is a wrapper around the original encrypt implementation to ensure compatibility.
+        
+        Args:
+            data (bytes): The data to encrypt
+            password (str): The password to use for encryption
+            
+        Returns:
+            EncryptedData: Object containing the encrypted data and metadata
+        """
+        try:
+            nonce = os.urandom(12)
+            key = self.derive_key(password)
+            aesgcm = AESGCM(key)
+            
+            ciphertext = aesgcm.encrypt(nonce, data, None)
+            signature = self._signing_key.sign(ciphertext)
+
+            # Include public key in encrypted data
+            public_key_bytes = self._signing_key.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw
+            )
+            
+            encrypted_data = EncryptedData(
+                nonce=base64.b64encode(nonce).decode('utf-8'),
+                salt=base64.b64encode(self.salt).decode('utf-8'),
+                ciphertext=base64.b64encode(ciphertext).decode('utf-8'),
+                signature=base64.b64encode(signature).decode('utf-8'),
+                public_key=base64.b64encode(public_key_bytes).decode('utf-8')
+            )
+            
+            self.logger.info("data_encrypted", bytes_encrypted=len(data))
+            return encrypted_data
+            
+        except Exception as e:
+            self.logger.error("encryption_failed", error=str(e))
+            raise
+
     def decrypt(self, encrypted_data: EncryptedData, password: str) -> bytes:
         """Decrypt data and verify its signature"""
         try:
