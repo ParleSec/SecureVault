@@ -1,14 +1,30 @@
 import click
 from pathlib import Path
-from .core.vault import SecureVault
+from secure_vault.core.vault import SecureVault
+import os
+import getpass
 
 @click.group()
 @click.option('--vault-dir', type=click.Path(), help='Vault directory location')
+@click.option('--master-password', help='Master password for key encryption (NOT recommended via command line)')
 @click.pass_context
-def cli(ctx, vault_dir):
-    """Secure File Vault - Encrypted File Storage System"""
+def cli(ctx, vault_dir, master_password):
+    """SecureVault - Encrypted File Storage System"""
     ctx.ensure_object(dict)
-    ctx.obj['vault'] = SecureVault(vault_dir)
+    
+    # Get master password securely if not provided
+    if not master_password:
+        master_password = os.getenv('VAULT_MASTER_PASSWORD')
+        
+        # If still no password and there's no password file, prompt for it
+        password_file = Path('./secure_vault/.master_password')
+        if not master_password and not password_file.exists():
+            master_password = getpass.getpass("Enter master password (or press Enter to generate one): ")
+            if not master_password:
+                click.echo("Generating secure master password...")
+    
+    # Initialize vault with master password  
+    ctx.obj['vault'] = SecureVault(vault_dir, master_password)
 
 @cli.command()
 @click.argument('file_path', type=click.Path(exists=True))
@@ -49,6 +65,29 @@ def list(ctx):
     click.echo("Encrypted files in vault:")
     for file in files:
         click.echo(f"  - {file.name}")
+
+@cli.command()
+@click.pass_context
+def change_master_password(ctx):
+    """Change the master password for the vault"""
+    current_password = getpass.getpass("Enter current master password: ")
+    new_password = getpass.getpass("Enter new master password: ")
+    confirm_password = getpass.getpass("Confirm new master password: ")
+    
+    if new_password != confirm_password:
+        click.echo("Passwords do not match", err=True)
+        exit(1)
+        
+    try:
+        success = ctx.obj['vault'].change_master_password(current_password, new_password)
+        if success:
+            click.echo("Master password changed successfully")
+        else:
+            click.echo("Failed to change master password - current password may be incorrect", err=True)
+            exit(1)
+    except Exception as e:
+        click.echo(f"Error changing master password: {str(e)}", err=True)
+        exit(1)
 
 def main():
     cli(obj={})

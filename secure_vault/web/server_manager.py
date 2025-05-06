@@ -31,6 +31,10 @@ class APIServerManager:
             cmd = [sys.executable, "main.py", "--api-server"]
 
             env = os.environ.copy()
+            
+            # FIXED: Always set VAULT_MASTER_PASSWORD to ensure consistent key management
+            env['VAULT_MASTER_PASSWORD'] = 'DefaultSecurePassword123!'
+            
             env.update({
                 'HOST': self.host,
                 'PORT': str(self.port),

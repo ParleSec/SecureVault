@@ -17,24 +17,62 @@ SENSITIVE_KEYS = {
     'credentials', 'auth', 'jwt', 'signature'
 }
 
-def sanitize_log_data(logger, method_name, event_dict):
+def sanitize_log_data(record: logging.LogRecord) -> logging.LogRecord:
     """
-    Sanitize sensitive data in log entries
-    """
-    # Deep copy to avoid modifying the original
-    for key, value in list(event_dict.items()):
-        # Check if key contains any sensitive patterns
-        if any(pattern in key.lower() for pattern in SENSITIVE_KEYS):
-            event_dict[key] = '[REDACTED]'
-        
-        # Check string values for sensitive data
-        elif isinstance(value, str):
-            for pattern in SENSITIVE_KEYS:
-                if pattern in key.lower():
-                    event_dict[key] = '[REDACTED]'
-                    break
+    Sanitize sensitive data in log records before they're emitted.
     
-    return event_dict
+    Args:
+        record: The log record to sanitize
+        
+    Returns:
+        The sanitized log record
+    """
+    # Skip if record doesn't have a message
+    if not hasattr(record, 'msg') or not record.msg:
+        return record
+    
+    # Patterns for sensitive data
+    patterns = [
+        # JWT tokens (base64 encoded strings with periods)
+        (r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+', '[REDACTED_JWT]'),
+        
+        # Passwords in various formats
+        (r'password["\']?\s*[:=]\s*["\']?[^"\'\s]+["\']?', 'password=[REDACTED]'),
+        (r'pass[wW]ord\s*[=:]\s*[^\s,;]+', 'password=[REDACTED]'),
+        
+        # API keys and tokens
+        (r'api[-_]?key\s*[=:]\s*[^\s,;]+', 'api_key=[REDACTED]'),
+        (r'token\s*[=:]\s*[^\s,;]+', 'token=[REDACTED]'),
+        
+        # Cookie values
+        (r'cookie\s*[=:]\s*[^\s,;]+', 'cookie=[REDACTED]'),
+        
+        # Bearer token headers
+        (r'Bearer\s+[A-Za-z0-9\._-]+', 'Bearer [REDACTED]'),
+        
+        # Basic auth headers
+        (r'Basic\s+[A-Za-z0-9+/=]+', 'Basic [REDACTED]'),
+    ]
+    
+    # Apply sanitization to the message string
+    sanitized_msg = record.msg
+    for pattern, replacement in patterns:
+        sanitized_msg = re.sub(pattern, replacement, str(sanitized_msg))
+    
+    # Update the record with sanitized message
+    record.msg = sanitized_msg
+    
+    # Also sanitize args if they exist
+    if hasattr(record, 'args') and record.args:
+        sanitized_args = []
+        for arg in record.args:
+            if isinstance(arg, str):
+                for pattern, replacement in patterns:
+                    arg = re.sub(pattern, replacement, arg)
+            sanitized_args.append(arg)
+        record.args = tuple(sanitized_args)
+    
+    return record
 
 class SecureLogHandler:
     """
@@ -130,54 +168,57 @@ class SecurityAuditLogger:
             # Fallback logging
             logging.error(f"Failed to write security audit log: {e}")
 
-def configure_logging(log_dir: str = './logs', 
-                     console_level: int = logging.INFO,
-                     file_level: int = logging.DEBUG):
-    """
-    Configure secure logging for the application
-    """
-    # Create secure log handler
-    handler = SecureLogHandler(log_dir)
-    
-    # Configure structlog
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            sanitize_log_data,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer()
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        cache_logger_on_first_use=True,
-    )
-    
-    # Configure standard logging
-    root_logger = logging.getLogger()
-    
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(console_level)
-    console_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    console_handler.setFormatter(console_formatter)
-    
-    # File handler
-    file_handler = handler.get_handler('app')
-    file_handler.setLevel(file_level)
-    
-    # Configure root logger
-    root_logger.handlers = []
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
-    root_logger.setLevel(min(console_level, file_level))
-    
-    # Create security audit logger
-    security_logger = SecurityAuditLogger(log_dir)
-    
-    return security_logger
+    def configure_logging(log_dir: str = './logs', 
+                        console_level: int = logging.INFO,
+                        file_level: int = logging.DEBUG):
+        """
+        Configure secure logging for the application with sensitive data sanitization
+        """
+        # Create secure log handler
+        handler = SecureLogHandler(log_dir)
+        
+        # Add the sanitizer to the logging chain
+        logging.setLogRecordFactory(sanitize_log_data)
+        
+        # Configure structlog
+        structlog.configure(
+            processors=[
+                structlog.stdlib.filter_by_level,
+                structlog.stdlib.add_logger_name,
+                structlog.stdlib.add_log_level,
+                structlog.stdlib.PositionalArgumentsFormatter(),
+                sanitize_log_data,  # Keep existing sanitizer too
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.JSONRenderer()
+            ],
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            context_class=dict,
+            cache_logger_on_first_use=True,
+        )
+        
+        # Configure standard logging
+        root_logger = logging.getLogger()
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(console_level)
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        console_handler.setFormatter(console_formatter)
+        
+        # File handler
+        file_handler = handler.get_handler('app')
+        file_handler.setLevel(file_level)
+        
+        # Configure root logger
+        root_logger.handlers = []
+        root_logger.addHandler(console_handler)
+        root_logger.addHandler(file_handler)
+        root_logger.setLevel(min(console_level, file_level))
+        
+        # Create security audit logger
+        security_logger = SecurityAuditLogger(log_dir)
+        
+        return security_logger

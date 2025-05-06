@@ -12,6 +12,7 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -173,3 +174,52 @@ def ensure_valid_cert_exists(cert_dir='./certs'):
         return generate_self_signed_cert(str(cert_path), str(key_path))
     
     return str(cert_path), str(key_path)
+
+
+def validate_certificate(cert_path: str) -> Tuple[bool, str]:
+    """
+    Validate a certificate for security issues.
+    
+    Args:
+        cert_path: Path to the certificate file
+        
+    Returns:
+        Tuple of (is_valid, reason)
+    """
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.backends import default_backend
+        from datetime import datetime, timedelta
+        
+        with open(cert_path, 'rb') as f:
+            cert_data = f.read()
+            cert = x509.load_pem_x509_certificate(cert_data, default_backend())
+            
+            # Check if certificate is expired or about to expire
+            now = datetime.utcnow()
+            if cert.not_valid_after < now:
+                return False, "Certificate has expired"
+            
+            # Check if certificate is about to expire (within 30 days)
+            if cert.not_valid_after < (now + timedelta(days=30)):
+                logger.warning(f"Certificate will expire soon: {cert.not_valid_after}")
+            
+            # Check if certificate is self-signed
+            is_self_signed = (cert.issuer == cert.subject)
+            
+            # Check key size for RSA keys
+            public_key = cert.public_key()
+            if hasattr(public_key, 'key_size'):
+                key_size = public_key.key_size
+                if key_size < 2048:
+                    return False, f"Certificate key size too small: {key_size} bits (minimum 2048 required)"
+            
+            # If self-signed, flag it but don't invalidate
+            if is_self_signed:
+                logger.warning("Certificate is self-signed and not suitable for production use")
+            
+            return True, "" if not is_self_signed else "Self-signed certificate"
+            
+    except Exception as e:
+        logger.error(f"Certificate validation error: {e}")
+        return False, f"Certificate validation error: {e}"
