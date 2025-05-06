@@ -22,20 +22,16 @@ Download and run the standalone executable without any installation:
 
 ```bash
 # Windows
-curl.exe -L -o SecureVault.exe https://github.com/yourusername/SecureVault/releases/latest/download/SecureVault-windows-amd64.exe
+curl.exe -L -o SecureVault.exe https://github.com/ParleSec/SecureVault/releases/latest/download/SecureVault-windows-amd64.exe
 .\SecureVault.exe
 
-# Linux
-curl -L -o securevault https://github.com/yourusername/SecureVault/releases/latest/download/securevault-linux-amd64
-chmod +x securevault
-./securevault
 ```
 
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/SecureVault
+git clone https://github.com/ParleSec/SecureVault
 cd SecureVault
 
 # (optional) Create virtual environment
@@ -300,7 +296,7 @@ SecureVault is available as pre-built executables for different platforms:
 
 ### Download Executables
 
-Pre-built executables can be downloaded from the [releases page](https://github.com/yourusername/SecureVault/releases).
+Pre-built executables can be downloaded from the [releases page](https://github.com/ParleSec/SecureVault/releases).
 
 ### Building Your Own Executable
 
