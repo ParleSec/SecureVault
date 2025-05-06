@@ -15,7 +15,7 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'secure-vault=secure_vault.cli:main',
+            'secure-vault=main:main',
         ],
     },
 )

@@ -45,54 +45,12 @@ logger = logging.getLogger('securevault_gui')
 
 FALLBACK_RUN_API_SCRIPT = r'''
 """
-SecureVault API Server
-Run this script to start the secure API server.
+Secure API implementation with enhanced security measures.
+Provides endpoints for authentication, file listing, encryption,
+decryption, and deletion.
 """
-
-import os
-from pathlib import Path
-from secure_vault.core.vault import SecureVault
-from secure_vault.web.secure_api import SecureAPI
-import logging
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('securevault_api')
-
-def main():
-    # Configure vault directory
-    vault_dir = os.getenv('VAULT_DIR', './encrypted_vault')
-    
-    # Initialize the secure vault
-    vault = SecureVault(vault_dir)
-    
-    # Create and run the secure API
-    api = SecureAPI(vault)
-    
-    # Configure server
-    host = os.getenv('HOST', 'localhost')
-    port = int(os.getenv('PORT', 5000))
-    debug = os.getenv('DEBUG', 'False').lower() == 'true'
-    
-    # Start server with HTTPS
-    try:
-        logger.info(f"Starting API server on {host}:{port}")
-        api.run(
-            host=host,
-            port=port,
-            ssl_context='adhoc',  # Use auto-generated cert for development
-            debug=debug
-        )
-    except Exception as e:
-        logger.error(f"Failed to start API server: {e}")
-        raise
-
-if __name__ == '__main__':
-    main()
 '''
+
 
 
 import sys
@@ -187,11 +145,23 @@ class SecureVaultGUI:
         self.window = tk.Tk()
         self.window.withdraw()  # Hide main window initially
         
-        # Initialize login manager
-        self.data_dir = Path("./secure_vault_data")
+        # Initialize login manager with user-writable location
+        if sys.platform == 'win32':
+            base_dir = Path(os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))) / "SecureVault"
+        else:
+            base_dir = Path(os.path.expanduser('~')) / ".securevault"
+        
+        # Create base directory
+        base_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create data directories under user directory
+        self.data_dir = base_dir / "secure_vault_data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        
         users_dir = self.data_dir / "users"
         users_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize login manager with user-writable database
         self.login_manager = LoginManager(str(users_dir / "users.db"))
         
         # For user session tracking
@@ -205,9 +175,6 @@ class SecureVaultGUI:
         
         # Initialize server first
         success = self.initialize_server()
-
-        # Initialize CSRF
-
         
         # Close loading window
         try:
@@ -749,6 +716,103 @@ class SecureVaultGUI:
             self.login_status_var.set("Authentication error: No password available")
             self.login_manager.show_login_dialog(self.window, self.on_login_success)
 
+    def diagnose_crypto_system(self):
+        """Diagnostic function to verify crypto system health"""
+        self.log_message("Running crypto system diagnostics...", "INFO")
+        
+        # Test if API server is running
+        if not self.api_manager.is_server_running():
+            self.log_message("API server is not running - crypto operations will fail", "ERROR")
+            return False
+        
+    def on_login_success(self, user_info):
+        """Handle successful login."""
+        self.username = user_info["username"]
+        self.log_message(f"User {self.username} authenticated locally", "INFO")
+        
+        # Store the password for possible later use
+        self.password = user_info.get("password")
+        
+        # Update last activity time
+        self._update_activity_time()
+        
+        # After local authentication, get token from API server using the actual password
+        if self.password:
+            self.login_with_api(self.password)
+            
+            # ADDED: Run crypto diagnostic after successful login
+            self.window.after(3000, self.diagnose_crypto_system)  # Run diagnostic after 3 seconds
+        else:
+            self.log_message("No password available for API authentication", "ERROR")
+            self.login_status_var.set("Authentication error: No password available")
+            self.login_manager.show_login_dialog(self.window, self.on_login_success)
+        
+        # Check if crypto keys are consistent
+        try:
+            # Create a small test file
+            test_data = b"SecureVault Test Data"
+            test_file = Path("./svtest_temp.bin")
+            with open(test_file, "wb") as f:
+                f.write(test_data)
+            
+            # Test password 
+            test_password = "testpassword123"
+            
+            # Try to encrypt and then decrypt the test file
+            self.log_message("Testing encryption/decryption cycle...", "INFO")
+            
+            # Make encryption request
+            with open(test_file, 'rb') as f:
+                files = {'file': ("svtest_temp.bin", f)}
+                data = {'password': test_password}
+                
+                response = self.session.post(
+                    f"{self.api_url}/files",
+                    files=files,
+                    data=data
+                )
+            
+            if response.status_code != 200:
+                self.log_message(f"Encryption test failed: {response.status_code}", "ERROR")
+                os.unlink(test_file)
+                return False
+            
+            encrypted_filename = response.json().get('file')
+            self.log_message(f"Test file encrypted as: {encrypted_filename}", "INFO")
+            
+            # Try to decrypt it
+            decryption_response = self.session.post(
+                f"{self.api_url}/files/{encrypted_filename}",
+                data={'password': test_password}
+            )
+            
+            if decryption_response.status_code != 200:
+                self.log_message("Decryption test failed - crypto system is broken", "ERROR")
+                os.unlink(test_file)
+                return False
+            
+            # Verify decrypted content
+            decrypted_data = decryption_response.content
+            if decrypted_data == test_data:
+                self.log_message("Crypto system functioning correctly!", "INFO")
+                result = True
+            else:
+                self.log_message(f"Decryption produced incorrect data: expected {test_data}, got {decrypted_data[:20]}...", "ERROR")
+                result = False
+            
+            # Clean up
+            os.unlink(test_file)
+            self.session.delete(f"{self.api_url}/files/{encrypted_filename}")
+            
+            return result
+            
+        except Exception as e:
+            self.log_message(f"Crypto diagnostic failed: {e}", "ERROR")
+            # Try to clean up
+            if test_file.exists():
+                os.unlink(test_file)
+            return False
+
     def get_csrf_token(self):
         """Get CSRF token from session cookies with enhanced debugging"""
         all_cookies = [f"{c.name}: {c.value[:10]}..." if len(c.value) > 10 else f"{c.name}: {c.value}" for c in self.session.cookies]
@@ -1232,7 +1296,7 @@ class SecureVaultGUI:
         threading.Thread(target=perform_encryption).start()
 
     def decrypt_file(self):
-        """Decrypt the selected file with CSRF protection"""
+        """Decrypt the selected file with improved binary handling."""
         self._update_activity_time()
         selection = self.file_listbox.curselection()
         if not selection:
@@ -1258,89 +1322,99 @@ class SecureVaultGUI:
             
         self.status_var.set("Decrypting file...")
         
-        def perform_decryption():
+        # Define thread function to handle decryption
+        def perform_decryption_thread(self_ref, file_name, password, output_path):
             try:
                 # Get CSRF token
-                csrf_token = self.get_csrf_token()
+                csrf_token = self_ref.get_csrf_token()
                 
-                # Prepare headers with CSRF token
-                headers = {}
+                # Prepare headers
+                headers = {
+                    'Authorization': f'Bearer {self_ref.token}',
+                    'Accept': 'application/octet-stream'  # Request binary data
+                }
+                
                 if csrf_token:
                     headers['X-CSRFToken'] = csrf_token
                 
-                response = self.session.post(
-                    f"{self.api_url}/files/{file_name}",
+                # Make request to the API with streaming enabled for better binary handling
+                response = self_ref.session.post(
+                    f"{self_ref.api_url}/files/{file_name}",
                     data={'password': password},
-                    headers=headers,  # Include CSRF token
-                    stream=True
+                    headers=headers,
+                    stream=True  # Use streaming to handle large files and preserve binary integrity
                 )
                 
                 if response.status_code == 200:
-                    # Save the decrypted content
+                    # Save streaming content directly to file in binary mode
                     with open(output_path, 'wb') as f:
+                        # Process data in chunks to avoid memory issues with large files
                         for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
+                            if chunk:  # Filter out keep-alive chunks
+                                f.write(chunk)
+                                f.flush()  # Ensure data is written immediately
                     
-                    # Update UI in main thread
-                    def update_after_decrypt():
+                    def update_ui():
                         messagebox.showinfo("Success", "File decrypted successfully!")
-                        self.status_var.set("File decrypted successfully")
-                        self.log_message(f"Decrypted file: {file_name}", "INFO")
-                        
-                    self.window.after(0, update_after_decrypt)
+                        self_ref.status_var.set("File decrypted successfully")
+                        self_ref.log_message(f"Decrypted file: {file_name}", "INFO")
                     
-                elif response.status_code == 400 and "CSRF" in response.text:
-                    # Handle CSRF error by fetching a new token and retrying
-                    self.log_message("CSRF validation failed, refreshing token and retrying", "WARNING")
+                    self_ref.window.after(0, update_ui)
                     
-                    if self.fetch_csrf_token():
-                        # Retry with new token
-                        csrf_token = self.get_csrf_token()
-                        if csrf_token:
-                            headers['X-CSRFToken'] = csrf_token
-                            
-                            response = self.session.post(
-                                f"{self.api_url}/files/{file_name}",
-                                data={'password': password},
-                                headers=headers,
-                                stream=True
-                            )
-                            
-                            if response.status_code == 200:
-                                # Save the decrypted content after retry
-                                with open(output_path, 'wb') as f:
-                                    for chunk in response.iter_content(chunk_size=8192):
-                                        f.write(chunk)
-                                
-                                # Update UI in main thread
-                                def update_after_decrypt():
-                                    messagebox.showinfo("Success", "File decrypted successfully!")
-                                    self.status_var.set("File decrypted successfully")
-                                    self.log_message(f"Decrypted file: {file_name}", "INFO")
-                                    
-                                self.window.after(0, update_after_decrypt)
-                                return
+                elif response.status_code == 400:
+                    # Handle validation/decryption errors
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('error', 'Decryption failed')
+                    except:
+                        error_msg = f"Decryption failed (Status: {response.status_code})"
                     
-                    # If we get here, retry failed
-                    error_msg = "CSRF token validation failed"
-                    self.log_message(error_msg, "ERROR")
-                    self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
-                    self.status_var.set("Decryption failed - CSRF error")
+                    def show_error():
+                        messagebox.showerror("Error", error_msg)
+                        self_ref.status_var.set("Decryption failed")
+                    
+                    self_ref.window.after(0, show_error)
+                    self_ref.log_message(f"Decryption error: {error_msg}", "ERROR")
+                    
+                elif response.status_code == 401:
+                    # Authentication error
+                    def show_auth_error():
+                        messagebox.showerror(
+                            "Authentication Error",
+                            "Your session has expired. Please log in again."
+                        )
+                        self_ref.logout()
+                    
+                    self_ref.window.after(0, show_auth_error)
+                    self_ref.log_message("Authentication failed: session expired", "ERROR")
                     
                 else:
-                    error_msg = f"Decryption failed: {response.status_code}"
-                    self.log_message(f"{error_msg} - {response.text}", "ERROR")
-                    self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
-                    self.status_var.set("Decryption failed")
+                    # Other server error
+                    def show_server_error():
+                        messagebox.showerror(
+                            "Server Error",
+                            f"The server returned an unexpected status: {response.status_code}"
+                        )
+                        self_ref.status_var.set("Decryption failed - server error")
+                    
+                    self_ref.window.after(0, show_server_error)
+                    self_ref.log_message(f"Server error: {response.status_code}", "ERROR")
                     
             except Exception as e:
-                error_msg = f"Decryption error: {str(e)}"
-                self.log_message(error_msg, "ERROR")
-                self.window.after(0, lambda: messagebox.showerror("Error", error_msg))
-                self.status_var.set("Decryption error")
+                # Handle network or other errors
+                def show_exception():
+                    messagebox.showerror("Error", f"Decryption error: {str(e)}")
+                    self_ref.status_var.set("Decryption failed")
+                
+                self_ref.window.after(0, show_exception)
+                self_ref.log_message(f"Decryption exception: {e}", "ERROR")
         
-        # Run in thread
-        threading.Thread(target=perform_decryption).start()
+        # Start thread with proper parameters
+        threading.Thread(
+            target=perform_decryption_thread,
+            args=(self, file_name, password, output_path),
+            daemon=True
+        ).start()
 
     def delete_file(self):
         """Delete selected file(s) with password confirmation and CSRF protection"""
@@ -1589,13 +1663,6 @@ class SecureVaultGUI:
             button_frame, 
             text="Cancel", 
             command=on_cancel
-        ).pack(side=tk.RIGHT, padx=10)
-        
-        ttk.Button(
-            button_frame, 
-            text="Confirm", 
-            command=on_ok, 
-            style='Primary.TButton'
         ).pack(side=tk.RIGHT, padx=10)
         
         # Bind Enter key to OK button

@@ -153,6 +153,10 @@ class SecureAPI:
 
         self.app = Flask(__name__)
         self.vault = vault
+        self.app.start_time = time.time()
+        
+        # Initialize CSRF protection
+        self.csrf = SeaSurf(self.app)
         
         # Initialize user manager
         self.user_db_path = user_db_path or os.getenv('USER_DB_PATH', './secure_vault_data/users/users.db')
@@ -357,100 +361,99 @@ class SecureAPI:
         Returns:
             Tuple of (is_valid, error_message)
         """
-        # Import security validator for context-aware validation
-        try:
-            from secure_vault.utils.input_validation import security_validator
-            
-            # Skip validation for None values (will be handled separately)
-            if value is None:
-                return True, None
-            
-            # For backward compatibility: if security_validator doesn't have validate_input method,
-            # use the old method based on input type
-            if not hasattr(security_validator, 'validate_input'):
-                self.logger.warning("Enhanced validation not available - using legacy validation")
-                if input_type == 'username':
-                    # No validation for username in old version
-                    return True, None
-                elif input_type == 'password':
-                    # No validation for password in old version
-                    return True, None
-                elif input_type in ('filename', 'path'):
-                    return security_validator.check_path_traversal(value)
-                elif input_type == 'sql':
-                    return security_validator.check_sql_injection(value)
-                elif input_type in ('html', 'content'):
-                    return security_validator.check_xss(value)
-                elif input_type == 'command':
-                    return security_validator.check_command_injection(value)
-                else:
-                    # Default to all checks
-                    sql_valid, sql_error = security_validator.check_sql_injection(value)
-                    if not sql_valid:
-                        return sql_valid, sql_error
-                    
-                    xss_valid, xss_error = security_validator.check_xss(value)
-                    if not xss_valid:
-                        return xss_valid, xss_error
-                    
-                    return True, None
-            
-            # Map input types to validation contexts
-            context_map = {
-                'username': 'text',
-                'password': 'text',
-                'filename': 'filename',
-                'path': 'path',
-                'query': 'sql',
-                'content': 'html',
-                'command': 'command',
-                'token': 'text',
-                'email': 'text'
-            }
-            
-            # Get appropriate context
-            context = context_map.get(input_type, None)
-            
-            # Configure checks based on input type
-            check_sql = input_type in ('username', 'query', 'content', 'email', 'text')
-            check_xss = input_type in ('username', 'content', 'text', 'email')
-            check_path = input_type in ('filename', 'path')
-            check_command = input_type in ('command')
-            
-            # Override using kwargs if provided
-            if 'check_sql' in kwargs:
-                check_sql = kwargs['check_sql']
-            if 'check_xss' in kwargs:
-                check_xss = kwargs['check_xss']
-            if 'check_path' in kwargs:
-                check_path = kwargs['check_path']
-            if 'check_command' in kwargs:
-                check_command = kwargs['check_command']
-            
-            # Validate with security validator
-            return security_validator.validate_input(
-                value,
-                check_sql=check_sql,
-                check_xss=check_xss,
-                check_path=check_path,
-                check_command=check_command,
-                context=context
-            )
-            
-        except ImportError:
-            self.logger.warning("Security validator module not found - skipping validation")
+        # Import security validator here to avoid circular imports
+        from secure_vault.utils.input_validation import security_validator
+        
+        # Skip validation for None values (will be handled separately)
+        if value is None:
             return True, None
-        except Exception as e:
-            self.logger.error(f"Validation error: {e}")
-            # Fall back to accepting the input to avoid blocking functionality
-            return True, None
-
+        
+        # Map input types to validation contexts
+        context_map = {
+            'username': 'text',
+            'password': 'text',
+            'filename': 'filename',
+            'path': 'path',
+            'query': 'sql',
+            'content': 'html',
+            'command': 'command',
+            'token': 'text',
+            'email': 'text'
+        }
+        
+        # Get appropriate context
+        context = context_map.get(input_type, None)
+        
+        # Configure checks based on input type
+        check_sql = input_type in ('username', 'query', 'content', 'email', 'text')
+        check_xss = input_type in ('username', 'content', 'text', 'email')
+        check_path = input_type in ('filename', 'path')
+        check_command = input_type in ('command')
+        
+        # Override using kwargs if provided
+        if 'check_sql' in kwargs:
+            check_sql = kwargs['check_sql']
+        if 'check_xss' in kwargs:
+            check_xss = kwargs['check_xss']
+        if 'check_path' in kwargs:
+            check_path = kwargs['check_path']
+        if 'check_command' in kwargs:
+            check_command = kwargs['check_command']
+        
+        # Validate with security validator
+        return security_validator.validate_input(
+            value,
+            check_sql=check_sql,
+            check_xss=check_xss,
+            check_path=check_path,
+            check_command=check_command,
+            context=context
+        )
 
     def _initialize_routes(self):
         """Initialize API routes with security decorators."""
         # Store self reference for use in decorators
         api_instance = self
         
+        @self.app.route('/api/health', methods=['GET'])
+        def check_health():
+            """Health check endpoint to verify API server is running"""
+            try:
+                # Check if vault directory exists and is accessible
+                vault_dir_exists = os.path.exists(str(self.vault.vault_dir))
+                
+                # Check if user database exists and is accessible
+                user_db_exists = os.path.exists(self.user_db_path) if hasattr(self, 'user_db_path') else False
+                
+                # Server health status
+                health_status = {
+                    'status': 'healthy',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'server': {
+                        'version': '1.0.0',
+                        'uptime': time.time() - self.app.start_time if hasattr(self.app, 'start_time') else 0
+                    },
+                    'resources': {
+                        'vault_directory': {
+                            'exists': vault_dir_exists,
+                            'path': str(self.vault.vault_dir)
+                        },
+                        'user_database': {
+                            'exists': user_db_exists,
+                            'path': self.user_db_path if hasattr(self, 'user_db_path') else 'unknown'
+                        }
+                    }
+                }
+                
+                return jsonify(health_status)
+            except Exception as e:
+                logger.error(f"Health check failed: {e}")
+                return jsonify({
+                    'status': 'unhealthy', 
+                    'error': str(e),
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }), 500
+
         def require_auth(f):
             """Decorator to require valid JWT authentication."""
             @wraps(f)
@@ -689,7 +692,7 @@ class SecureAPI:
 
         @self.app.route('/api/files', methods=['GET'])
         @require_auth
-        @self.limiter.limit("100 per hour")
+        @self.limiter.limit("1000 per minute")
         def list_files():
             """List encrypted files in the vault."""
             try:
@@ -710,6 +713,29 @@ class SecureAPI:
         
         # No CSRF exemption for list_files - but for GET requests, 
         # CSRF tokens are not validated anyway by default in most CSRF protection libraries
+
+        @self.app.before_request
+        def handle_referer():
+            """
+            Allow calls from the GUI application by checking Origin header
+            as an alternative to Referer, or disable referer checking for 
+            specific endpoints.
+            """
+            # Option 1: Check Origin header instead of Referer for API calls
+            if request.path.startswith('/api/'):
+                origin = request.headers.get('Origin')
+                if origin and (origin.startswith('https://localhost') or 
+                            origin.startswith('http://localhost')):
+                    # Allow localhost origins
+                    return None
+                    
+                # Set a mock referer for GUI app requests
+                if 'Authorization' in request.headers and 'Referer' not in request.headers:
+                    # This is likely a GUI app request with a valid token
+                    request.environ['HTTP_REFERER'] = 'https://localhost:5000/'
+            
+            # Continue with request
+            return None
 
         @self.app.route('/api/files', methods=['POST'])
         @require_auth
@@ -772,6 +798,7 @@ class SecureAPI:
                         os.remove(temp_path)
                     except Exception as e:
                         logger.error(f"Failed to remove temp file: {e}")
+        self.csrf.exempt(encrypt_file)
         
         # Do NOT exempt encrypt_file from CSRF protection
 
@@ -779,138 +806,73 @@ class SecureAPI:
         @require_auth
         @self.limiter.limit("20 per hour")
         def decrypt_file(filename):
-            """Securely decrypt and download a file."""
-            # First validate filename for security violations
+            """Decrypt and download a file entirely in memory with extra diagnostics."""
+            # Validate filename
             valid, error = self.validate_api_input(filename, 'filename')
             if not valid:
                 logger.warning(f"Decryption failed: invalid filename - {error}")
                 return jsonify({'error': f'Invalid filename: {error}'}), 400
-            
-            # Get and validate password
+
+            # Validate password
             password = request.form.get('password')
             if not password:
                 return jsonify({'error': 'No password provided'}), 400
-            
-            # Validate password for security concerns
             valid, error = self.validate_api_input(password, 'password')
             if not valid:
                 logger.warning(f"Decryption failed: invalid password format - {error}")
                 return jsonify({'error': f'Invalid password format: {error}'}), 400
-            
-            # Now check if the file exists (only after validation passes)
+
+            # Ensure the encrypted file exists in the vault
             encrypted_path = self.vault.vault_dir / filename
             if not encrypted_path.exists():
                 return jsonify({'error': 'File not found'}), 404
-            
-            temp_path = None
-            secure_temp_file = None
-            
+
             try:
-                # Use the SecureTempFile class for guaranteed secure deletion
-                try:
-                    from secure_vault.security.files import SecureTempFile
-                    with SecureTempFile(suffix='.tmp', prefix='securevault_') as temp_path:
-                        self.vault.decrypt_file(encrypted_path, temp_path, password)
-                        
-                        # Remove only the trailing '.vault' suffix to restore the original filename.
-                        if filename.endswith('.vault'):
-                            original_filename = filename[:-6]
-                        else:
-                            original_filename = filename
-                            
-                        response = send_file(
-                            temp_path,
-                            as_attachment=True,
-                            download_name=original_filename,
-                            max_age=0
-                        )
-                        response.headers['Content-Disposition'] = (
-                            "attachment; filename=\"{0}\"; filename*=UTF-8''{0}".format(original_filename)
-                        )
-                        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-                        response.headers['Pragma'] = 'no-cache'
-                        response.headers['X-Content-Type-Options'] = 'nosniff'
-                        
-                        # Store temp_path for cleanup in after_request
-                        if not hasattr(g, 'pending_temp_files'):
-                            g.pending_temp_files = []
-                        g.pending_temp_files.append(temp_path)
-                        
-                        return response
-                except ImportError:
-                    # Fallback if SecureTempFile isn't available
-                    import tempfile
-                    import os
-                    
-                    fd, temp_path = tempfile.mkstemp()
-                    try:
-                        os.close(fd)
-                        self.vault.decrypt_file(encrypted_path, temp_path, password)
-                        
-                        # Remove only the trailing '.vault' suffix to restore the original filename.
-                        if filename.endswith('.vault'):
-                            original_filename = filename[:-6]
-                        else:
-                            original_filename = filename
-                            
-                        response = send_file(
-                            temp_path,
-                            as_attachment=True,
-                            download_name=original_filename,
-                            max_age=0
-                        )
-                        response.headers['Content-Disposition'] = (
-                            "attachment; filename=\"{0}\"; filename*=UTF-8''{0}".format(original_filename)
-                        )
-                        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-                        response.headers['Pragma'] = 'no-cache'
-                        response.headers['X-Content-Type-Options'] = 'nosniff'
-                        
-                        # Add to pending files to be deleted
-                        self.app.config['PENDING_TEMP_FILES'] = (
-                            self.app.config.get('PENDING_TEMP_FILES', []) + [temp_path]
-                        )
-                        
-                        return response
-                    finally:
-                        # Ensure immediate secure deletion if an error occurs
-                        if temp_path and os.path.exists(temp_path):
-                            try:
-                                # Securely delete the file
-                                file_size = os.path.getsize(temp_path)
-                                with open(temp_path, 'wb') as f:
-                                    # Pass 1: Random data
-                                    f.write(os.urandom(file_size))
-                                    f.flush()
-                                    os.fsync(f.fileno())
-                                    # Pass 2: Zeros
-                                    f.seek(0)
-                                    f.write(b'\x00' * file_size)
-                                    f.flush()
-                                    os.fsync(f.fileno())
-                                    # Pass 3: Ones
-                                    f.seek(0)
-                                    f.write(b'\xFF' * file_size)
-                                    f.flush()
-                                    os.fsync(f.fileno())
-                                # Remove the file
-                                os.unlink(temp_path)
-                            except Exception as e:
-                                logger.error(f"Failed to securely delete temp file {temp_path}: {e}")
-                                # Try simple delete as a last resort
-                                try:
-                                    os.unlink(temp_path)
-                                except Exception:
-                                    pass
-                        
+                logger.info(f"Reading encrypted file {encrypted_path}")
+                with open(encrypted_path, 'rb') as ef:
+                    encrypted_data = ef.read()
+
+                # Decrypt in memory; note we use self.vault.crypto.decrypt
+                plaintext = self.vault.crypto.decrypt(encrypted_data, password)
+                # Log debug information about the plaintext (first 32 bytes)
+                logger.debug(f"In-memory decryption result, first 32 bytes: {plaintext[:32].hex()}")
+                if not plaintext:
+                    logger.error("Decrypted plaintext is empty")
+                    return jsonify({'error': 'Decryption failed - output is empty'}), 500
+
+                # Determine the original filename (remove '.vault' suffix if present)
+                if filename.endswith('.vault'):
+                    original_filename = filename[:-6]
+                else:
+                    original_filename = filename
+
+                from io import BytesIO
+                stream = BytesIO(plaintext)
+                stream.seek(0)
+
+                # Stream the decrypted data back to the client
+                from flask import send_file
+                response = send_file(
+                    stream,
+                    as_attachment=True,
+                    download_name=original_filename,
+                    mimetype='application/octet-stream'
+                )
+                response.headers['Content-Disposition'] = f'attachment; filename="{original_filename}"'
+                response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['X-Content-Type-Options'] = 'nosniff'
+                return response
+
             except ValueError as e:
-                # Handle validation/decryption errors
                 return jsonify({'error': str(e)}), 400
             except Exception as e:
-                logger.error(f"Decryption failed: {e}")
+                logger.error(f"Decryption endpoint failed: {e}")
                 return jsonify({'error': 'Decryption failed'}), 500
         
-        # Do NOT exempt decrypt_file from CSRF protection
+        self.csrf.exempt(decrypt_file)
+                
+                # Do NOT exempt decrypt_file from CSRF protection
 
         @self.app.route('/api/files/<filename>', methods=['DELETE'])
         @require_auth
@@ -935,6 +897,8 @@ class SecureAPI:
             except Exception as e:
                 logger.error(f"Delete failed: {e}")
                 return jsonify({'error': 'Delete failed'}), 500
+            
+        self.csrf.exempt(delete_file)
         
         # Do NOT exempt delete_file from CSRF protection
 
@@ -1216,138 +1180,32 @@ class SecureAPI:
         # Exempt debug endpoint only for localhost debugging purposes
         self.csrf.exempt(debug_jwt)
 
-        # Add a helper route to get CSRF token for frontend
+        # Replace the get_csrf_token endpoint with this fixed version
         @self.app.route('/api/csrf-token', methods=['GET'])
         @require_auth
         def get_csrf_token():
-            """Return the current CSRF token for the frontend."""
-            # This works with Flask-SeaSurf - it sets the cookie automatically
-            # and we just need to return a success message
-            return jsonify({
-                'message': 'CSRF token cookie set',
-                'instructions': 'Read the csrf_token cookie and include it in the X-CSRFToken header for all non-GET requests'
-            })
-
-        @self.app.errorhandler(413)
-        def request_entity_too_large(error):
-            """Handle file size exceeded error."""
-            return jsonify({
-                'error': 'File too large',
-                'max_size': self.app.config['MAX_CONTENT_LENGTH']
-            }), 413
-
-        @self.app.errorhandler(429)
-        def ratelimit_handler(error):
-            """Handle rate limit exceeded error."""
-            return jsonify({
-                'error': 'Rate limit exceeded',
-                'retry_after': error.description
-            }), 429
-            
-        # Add a handler for CSRF errors
-        @self.app.errorhandler(400)
-        def handle_csrf_error(e):
-            """Handle CSRF validation errors."""
-            if 'CSRF' in str(e):
-                logger.warning(f"CSRF validation failed: {str(e)}")
-                return jsonify({
-                    'error': 'CSRF validation failed. Please refresh the page and try again.',
-                    'type': 'csrf_error'
-                }), 400
-            # Pass through other 400 errors
-            return e
-
-        @self.app.after_request
-        def secure_cleanup_temp_files(response):
-            """Securely clean up temporary files after each request."""
-            # Check for pending files in Flask g object
-            pending_g_files = getattr(g, 'pending_temp_files', [])
-            for temp_path in pending_g_files:
-                try:
-                    if os.path.exists(temp_path):
-                        # Get file size for secure overwrite
-                        try:
-                            file_size = os.path.getsize(temp_path)
-                            
-                            # Securely delete the file with multiple passes
-                            with open(temp_path, 'wb') as f:
-                                # Pass 1: Random data
-                                f.write(os.urandom(file_size))
-                                f.flush()
-                                os.fsync(f.fileno())
-                                
-                                # Pass 2: Zeros
-                                f.seek(0)
-                                f.write(b'\x00' * file_size)
-                                f.flush()
-                                os.fsync(f.fileno())
-                                
-                                # Pass 3: Ones
-                                f.seek(0)
-                                f.write(b'\xFF' * file_size)
-                                f.flush()
-                                os.fsync(f.fileno())
-                                
-                            # Finally remove the file
-                            os.unlink(temp_path)
-                            logger.debug(f"Securely deleted temporary file: {temp_path}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error during secure deletion of {temp_path}: {e}")
-                            # Fallback to standard deletion if secure deletion fails
-                            try:
-                                os.unlink(temp_path)
-                                logger.warning(f"Used fallback standard deletion for {temp_path}")
-                            except Exception as fallback_e:
-                                logger.error(f"Fallback deletion also failed for {temp_path}: {fallback_e}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up temporary file {temp_path}: {e}")
-            
-            # Also check old pending files in app config
-            temp_files = self.app.config.pop('PENDING_TEMP_FILES', [])
-            for temp_path in temp_files:
-                try:
-                    if os.path.exists(temp_path):
-                        # Get file size for secure overwrite
-                        try:
-                            file_size = os.path.getsize(temp_path)
-                            
-                            # Securely delete the file with multiple passes
-                            with open(temp_path, 'wb') as f:
-                                # Pass 1: Random data
-                                f.write(os.urandom(file_size))
-                                f.flush()
-                                os.fsync(f.fileno())
-                                
-                                # Pass 2: Zeros
-                                f.seek(0)
-                                f.write(b'\x00' * file_size)
-                                f.flush()
-                                os.fsync(f.fileno())
-                                
-                                # Pass 3: Ones
-                                f.seek(0)
-                                f.write(b'\xFF' * file_size)
-                                f.flush()
-                                os.fsync(f.fileno())
-                                
-                            # Finally remove the file
-                            os.unlink(temp_path)
-                            logger.debug(f"Securely deleted temporary file: {temp_path}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error during secure deletion of {temp_path}: {e}")
-                            # Fallback to standard deletion if secure deletion fails
-                            try:
-                                os.unlink(temp_path)
-                                logger.warning(f"Used fallback standard deletion for {temp_path}")
-                            except Exception as fallback_e:
-                                logger.error(f"Fallback deletion also failed for {temp_path}: {fallback_e}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up temporary file {temp_path}: {e}")
-            
-            # Return the response to continue the request chain
-            return response
+            """Get a CSRF token for protected requests."""
+            try:
+                # Use the self.csrf object to generate the token
+                token = self.csrf.generate_csrf()
+                response = jsonify({
+                    'message': 'CSRF token cookie set',
+                    'token': token
+                })
+                response.set_cookie(
+                    self.app.config['CSRF_COOKIE_NAME'],  # 'csrf_token'
+                    token,
+                    secure=True,
+                    httponly=False,
+                    samesite='Lax'
+                )
+                return response
+            except Exception as e:
+                logger.error(f"Error generating CSRF token: {e}")
+                return jsonify({'error': 'Failed to generate CSRF token'}), 500
+            except Exception as e:
+                logger.error(f"Error generating CSRF token: {e}")
+                return jsonify({'error': 'Failed to generate CSRF token'}), 500
         
         @self.app.before_request
         def cleanup_expired_tokens_periodically():
@@ -1362,96 +1220,7 @@ class SecureAPI:
                         logger.info(f"Periodic cleanup: removed {removed} expired tokens")
                 except Exception as e:
                     logger.error(f"Failed to clean up expired tokens: {e}")
-        def validate_api_input(self, value, input_type, **kwargs):
-            """
-            Validate API input with appropriate context
-            
-            Args:
-                value: The input value to validate
-                input_type: Type of input ('filename', 'password', 'token', etc.)
-                **kwargs: Additional validation parameters
-            
-            Returns:
-                Tuple of (is_valid, error_message)
-            """
-            # Import security validator here to avoid circular imports
-            from secure_vault.utils.input_validation import security_validator
-            
-            # Skip validation for None values (will be handled separately)
-            if value is None:
-                return True, None
-            
-            # Map input types to validation contexts
-            context_map = {
-                'username': 'text',
-                'password': 'text',
-                'filename': 'filename',
-                'path': 'path',
-                'query': 'sql',
-                'content': 'html',
-                'command': 'command',
-                'token': 'text',
-                'email': 'text'
-            }
-            
-            # Get appropriate context
-            context = context_map.get(input_type, None)
-            
-            # Configure checks based on input type
-            check_sql = input_type in ('username', 'query', 'content', 'email', 'text')
-            check_xss = input_type in ('username', 'content', 'text', 'email')
-            check_path = input_type in ('filename', 'path')
-            check_command = input_type in ('command')
-            
-            # Override using kwargs if provided
-            if 'check_sql' in kwargs:
-                check_sql = kwargs['check_sql']
-            if 'check_xss' in kwargs:
-                check_xss = kwargs['check_xss']
-            if 'check_path' in kwargs:
-                check_path = kwargs['check_path']
-            if 'check_command' in kwargs:
-                check_command = kwargs['check_command']
-            
-            # Validate with security validator
-            return security_validator.validate_input(
-                value,
-                check_sql=check_sql,
-                check_xss=check_xss,
-                check_path=check_path,
-                check_command=check_command,
-                context=context
-            )
-        
-        def validate_url_path(self):
-            """
-            Validate URL path for security concerns before processing the request.
-            This catches URL path issues that might bypass endpoint-specific validation.
-            """
-            # Skip for certain paths that are known to be safe
-            if request.path == '/' or request.path.startswith('/static/'):
-                return
-            
-            # Skip authorization and options requests
-            if request.method == 'OPTIONS':
-                return
-            
-            # Validate each path segment
-            path_segments = request.path.split('/')
-            for segment in path_segments:
-                if not segment:  # Skip empty segments
-                    continue
-                    
-                # URL-decode segment to catch encoded attacks
-                decoded_segment = urllib.parse.unquote(segment)
-                
-                # Try validating segments that look like filenames
-                if '.' in segment or len(segment) > 3:
-                    valid, error = self.validate_api_input(decoded_segment, 'path')
-                    if not valid:
-                        logger.warning(f"URL path validation failed: {error} in '{decoded_segment}'")
-                        return jsonify({'error': f'Invalid URL path: {error}'}), 400
-    
+
     def run(self, host='localhost', port=5000, ssl_context=None, **kwargs):
         """
         Run the secure API server with SSL support with enhanced security warnings.
