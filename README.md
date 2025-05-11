@@ -22,7 +22,7 @@ Download and run the standalone executable without any installation:
 
 ```bash
 # Windows
-curl.exe -L -o SecureVault.exe https://github.com/ParleSec/SecureVault/releases/latest/download/SecureVault-windows-amd64.exe
+curl.exe -L -o SecureVault.exe https://github.com/ParleSec/SecureVault/releases/download/v2.0.0/SecureVault-windows-amd64.exe
 .\SecureVault.exe
 
 ```
