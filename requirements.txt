@@ -6,7 +6,7 @@ structlog>=23.0.0      # For logging
 python-dotenv>=1.0.0   # For environment variables
 bcrypt>=4.0.1          # For password hashing
 rich>=13.0.0           # For console output formatting
-requests>=2.31.0       # For API requests
+requests>=2.32.4       # For API requests
 
 # Web API dependencies
 flask>=2.0.0           # For web API
