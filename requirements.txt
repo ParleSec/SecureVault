@@ -35,3 +35,4 @@ safety>=2.3.5          # For dependency vulnerability checking
 prometheus-flask-exporter>=0.22.4  # For metrics collection
 python-memcached>=1.59             # For rate limiting storage (production)
 urllib3>=2.5.0 # not directly required, pinned by Snyk to avoid a vulnerability
+authlib>=1.6.4 # not directly required, pinned by Snyk to avoid a vulnerability
